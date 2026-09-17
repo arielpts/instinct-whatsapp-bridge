@@ -131,8 +131,9 @@ for all development.
 
 - **SEC-1 — Explicit permissions.** Permissions are per conversation and per
   action (`read`, `draft`, `send`). No wildcards. Anything not granted is denied.
-  Changing the allowlist requires editing config on the box and a restart —
-  it is never changeable by email or by message.
+  Changing the allowlist requires editing the config file on the box and a
+  restart — never by email, never by message, and never by an environment
+  variable (§9.1).
 - **SEC-2 — Authenticated email in both directions.** Forwards are DKIM-signed and
   carry an HMAC in both the subject token and the `Message-ID` (§7.1). Inbound
   mail is accepted only if every one of these holds: the `From` is the single
@@ -184,9 +185,12 @@ for all development.
   window (default 7 days) then purged; the audit log keeps identifiers, hashes
   and outcomes indefinitely, but not the content. Third parties' messages are
   never retained longer than needed to service a reply.
-- **SEC-8 — Secrets on disk.** Credentials live in a file owned by the service
-  user with mode `0600`, never in the repository, never in command-line
-  arguments, never in the logs.
+- **SEC-8 — Secrets on disk.** Credentials reach the process through the
+  environment, loaded by systemd from an `EnvironmentFile` owned by the service
+  user with mode `0600` — never `Environment=` lines in the unit (unit files are
+  world-readable and `systemctl show` prints them), never command-line arguments
+  (`/proc/*/cmdline` is world-readable), never the repository, never the logs.
+  The environment is inherited by child processes, so the bridge execs nothing.
 - **SEC-9 — Discard history sync.** On pairing, WhatsApp pushes recent history
   for *all* chats, not only allow-listed ones (whatsmeow surfaces this as
   `*events.HistorySync`). It arrives ahead of any filter the natural design would
@@ -562,20 +566,53 @@ account. Encrypted, off-box, and the restore tested at least once before M4.
 
 ## 9. Configuration
 
+Two sources, split by kind. **The environment carries deployment identity and
+secrets; the file carries policy.** Which domain we are and which mailbox we log
+into changes per box and must not sit in the repository; who may be messaged and
+under what limits is the substance of the thing and belongs in a file that can be
+reviewed and diffed.
+
+### 9.1 Environment
+
+```sh
+WA_BRIDGE_MAIL_DOMAIN=wa.example.com          # the catch-all subdomain
+WA_BRIDGE_MAILBOX=bridge@wa.example.com       # receives the whole catch-all
+WA_BRIDGE_ASSISTANT_ADDRESS=assistant@mail.instinct.com
+WA_BRIDGE_IMAP_HOST=imap.provider.net
+WA_BRIDGE_IMAP_USER=…
+WA_BRIDGE_IMAP_PASSWORD=…                    # secret
+WA_BRIDGE_SMTP_HOST=smtp.provider.net       # submission, 587
+WA_BRIDGE_SMTP_USER=…
+WA_BRIDGE_SMTP_PASSWORD=…                    # secret
+WA_BRIDGE_HMAC_KEY=…                        # secret; signs tokens and Message-IDs
+WA_BRIDGE_STATE_DIR=/var/lib/wa-bridge
+WA_BRIDGE_CONFIG=/etc/wa-bridge/config.toml
+```
+
+**The environment may tighten, never loosen.** `WA_BRIDGE_MODE=draft-only` can
+force draft-only over a file that permits sending; no variable can enable
+sending, add a conversation, raise a quota, or widen the sender allowlist. Policy
+moves in one direction from the environment, because a drop-in env file is the
+easiest thing on the box to change by accident and the hardest to notice.
+
+Startup fails closed: an unset or malformed domain, mailbox or HMAC key refuses
+to start rather than defaulting. The resolved domain is logged once at startup so
+a misconfiguration is visible in the first line of the journal rather than in a
+message that went somewhere unexpected.
+
+The mail domain is recorded in `state.db` on first run. If it later changes,
+tokens issued under the old domain are refused rather than redeemed, and
+in-flight candidates are expired — addresses and tokens are scoped to a domain,
+and carrying them across one is a replay waiting to happen.
+
+### 9.2 Configuration file
+
 ```toml
 mode           = "draft-only"   # draft-only | approve-each | approve-except
 address_style  = "number"       # number | opaque  (§6.3)
 retention_days = 7
 
-[mail]
-# our side: a catch-all on a dedicated subdomain
-domain    = "wa.example.com"
-mailbox   = "bridge@wa.example.com"      # receives the whole catch-all
-imap_host = "imap.provider.net"
-smtp_host = "smtp.provider.net"        # submission, port 587
-
-# the assistant: the only sender we accept, the only recipient we send to
-assistant_address = "assistant@mail.instinct.com"
+# Mail hosts, domain, mailbox and credentials come from the environment (§9.1).
 
 # SEC-14 — empty until filled in from observed real mail; nothing is accepted
 # while it is empty. authserv_id names OUR provider, the only stamp we trust.
@@ -606,6 +643,11 @@ actions = ["read", "draft"]                  # "send" added only in phase M3
 hand-written JID is a guess, and §6.2 exists because guesses here are wrong often
 enough to matter.
 
+`[instinct].from_addresses` is the list of senders we *accept*;
+`WA_BRIDGE_ASSISTANT_ADDRESS` is the single address we *send to*. Different
+roles, and the accept side stays in reviewable policy rather than in the
+environment.
+
 ## 10. Roadmap and tasks
 
 Phases are gates, not suggestions: phase N+1 does not begin until phase N's exit
@@ -621,6 +663,8 @@ criterion holds.
 - [ ] Confirm `assistant@mail.instinct.com` exists, and pin Instinct's DKIM `d=`
       domain — SEC-2 cannot be implemented without it (§11)
 - [ ] Provision the box: arm64 VPS, Debian, service user, unattended-upgrades
+- [ ] Config loader: environment for identity and secrets, file for policy, with
+      the tighten-only rule and fail-closed startup validation (§9)
 - **Exit:** the approach and its risks are written down and accepted.
 
 ### M1 — Read-only forwarding *(the first rollout step)*
