@@ -76,9 +76,10 @@ itself. If the linked device session is stolen, the bridge's locks are moot.
 
 **Legal / ToS note.** WhatsApp's official APIs (Cloud API / Business Platform)
 cover *business* numbers only; there is no sanctioned API for a personal
-account's conversations. Any implementation that links a personal account is
-using the multi-device linked-device protocol through an unofficial client
-library, which is against WhatsApp's Terms of Service and carries a real risk of
+account's conversations. This project links a personal account through
+whatsmeow, an unofficial implementation of the multi-device protocol — the same
+library WAHA's GOWS engine uses. Maturity of the library does not change the
+status: it is against WhatsApp's Terms of Service and carries a real risk of
 the number being banned. This project treats that as a decision for the owner to
 make knowingly — it is documented here, not hidden, and `docs/adr/0001` must
 record the choice before any code touches a real account. Use a secondary number
@@ -95,7 +96,9 @@ for all development.
   identifier, message identifier, and body.
 - **FR-3 — Stable identifiers.** Every conversation and message carries an
   identifier that is unique, stable across restarts, and opaque (does not leak a
-  phone number). Identifiers appear in email headers, not only in prose.
+  phone number). WhatsApp JIDs contain the phone number, so the outward
+  identifier is an HMAC of the JID under a local key; the raw JID never leaves
+  the box. Identifiers appear in email headers, not only in prose.
 - **FR-4 — Reply ingestion.** The bridge polls the mailbox, parses reply emails
   in the command format (§6.2), and enqueues a candidate outbound message.
 - **FR-5 — Approval queue.** A candidate message is delivered only after the
@@ -143,6 +146,16 @@ for all development.
 - **SEC-8 — Secrets on disk.** Credentials live in a file owned by the service
   user with mode `0600`, never in the repository, never in command-line
   arguments, never in the logs.
+- **SEC-9 — Discard history sync.** On pairing, WhatsApp pushes recent history
+  for *all* chats, not only allow-listed ones (whatsmeow surfaces this as
+  `*events.HistorySync`). It arrives ahead of any filter the natural design would
+  put in its way, so the handler drops it unconditionally and persists nothing.
+  Otherwise the bridge's very first act violates the "never mirror the whole
+  account" non-goal. Verified by test, not by inspection.
+- **SEC-10 — Reading leaves no trace.** Read receipts and typing indicators are
+  never emitted. Both are visible to the third party, and marking messages read
+  silently alters the owner's own unread state on their phone. Reading is
+  observation only.
 
 ### 4.3 Operational
 
@@ -166,7 +179,7 @@ for all development.
           │  inbound message
           ▼
   ┌───────────────────┐
-  │  wa-client        │  unofficial multi-device client; receive only
+  │  whatsmeow client │  multi-device; receive only, history sync dropped
   └────────┬──────────┘
            ▼
   ┌───────────────────┐   drop if conversation not allow-listed (SEC-1)
@@ -204,12 +217,47 @@ for all development.
      WhatsApp send          →  audit log (OPS-3) at every arrow
 ```
 
-**Stack.** Go, single static binary, `mdp/whatsmeow` for the WhatsApp side,
-SQLite (WAL) for state, `net/smtp` + an IMAP client for mail. Go is chosen over
-a Node/Baileys stack specifically for the box size: a static binary with a
-~40–80 MB resident set versus several hundred megabytes for a Node runtime plus
-a browser-free but memory-hungry client, and no dependency tree to keep patched
-on a machine nobody is watching.
+**Stack.** Go, single static binary, [`whatsmeow`](https://github.com/tulir/whatsmeow)
+(`go.mau.fi/whatsmeow`) for the WhatsApp side, SQLite (WAL) for state,
+`net/smtp` + an IMAP client for mail.
+
+### 5.1 WhatsApp client layer
+
+The client layer is **whatsmeow** — the Go multi-device library that
+[WAHA](https://github.com/devlikeapro/waha) runs underneath its **GOWS** engine,
+and the same library behind `mautrix-whatsapp`. WAHA describes GOWS as the
+browser-free, Go, "future replacement for NOWEB" alongside its two older engines,
+WEBJS (whatsapp-web.js driving a headless Chromium) and NOWEB (Baileys on Node).
+
+We take the library, not the wrapper. WAHA is a Dockerised REST service; running
+it means a container plus an HTTP layer plus our bridge on top, and our bridge
+would then re-implement the allowlist and the send gate *above* an API that is
+itself capable of sending anywhere. Linking whatsmeow directly means the send
+path exists only inside the binary that owns the locks, and the box runs one
+process instead of three. WAHA remains the reference implementation to read when
+the protocol misbehaves.
+
+Why this over the alternatives, for this box specifically: WEBJS needs a headless
+Chromium, which is several hundred megabytes of RSS before a message is
+processed and is not a serious proposition on a 512 MB machine; NOWEB/Baileys
+drops the browser but keeps a Node runtime and a large dependency tree to patch
+on a machine nobody is watching. A static Go binary is ~40–80 MB resident with
+no runtime to install.
+
+Build note: whatsmeow's `sqlstore` upstream examples use the cgo `sqlite3`
+driver. We register the pure-Go `modernc.org/sqlite` driver instead so the
+binary builds with `CGO_ENABLED=0` and cross-compiles to arm64 from anywhere.
+Foreign keys must be on (`?_foreign_keys=on`) either way.
+
+Concretely, from whatsmeow: `sqlstore.New` → `GetFirstDevice` for the device
+store, `GetQRChannel` or `PairPhone` to link, `AddEventHandler` for
+`*events.Message`, and `SendMessage` with a `ContextInfo` carrying the quoted
+message key for threaded replies.
+
+Two of its behaviours are security-relevant, and both are requirements rather
+than settings: the `*events.HistorySync` payload delivered at pairing is dropped
+unconditionally (`SEC-9`), and `MarkRead` / `SendChatPresence` stay off so that
+reading leaves no trace on the account (`SEC-10`).
 
 **Approval channel.** v1 uses the owner's own WhatsApp chat with the bridge
 (the same chat the assistant already talks in), because it needs no extra
@@ -302,13 +350,17 @@ criterion holds.
 
 ### M0 — Decisions and skeleton
 - [ ] ADR 0001: record the WhatsApp-access decision and its ToS/ban risk, signed off by the owner
-- [ ] ADR 0002: Go + whatsmeow + SQLite, with the small-box rationale
+- [ ] ADR 0002: whatsmeow (the library behind WAHA's GOWS engine) + SQLite, with
+      the small-box rationale and the reasons for embedding it rather than running WAHA
 - [ ] Repository skeleton, `Makefile`, static build, CI that builds for arm64 and amd64
 - [ ] `PROTOCOL.md` promoted out of §6 into its own normative document
 - **Exit:** the approach and its risks are written down and accepted.
 
 ### M1 — Read-only forwarding *(the first rollout step)*
-- [ ] WhatsApp client: link device, receive text messages, reconnect cleanly
+- [ ] whatsmeow: `sqlstore` on the pure-Go SQLite driver, device link (QR or `PairPhone`)
+- [ ] `*events.Message` handling for text; reconnect and keepalive survive a network drop
+- [ ] `*events.HistorySync` discarded unconditionally, with a test (`SEC-9`)
+- [ ] Read receipts and chat presence verified off (`SEC-10`)
 - [ ] Allowlist filter with an empty default (`SEC-1`)
 - [ ] Opaque stable identifiers for conversations and messages (`FR-3`)
 - [ ] SQLite schema + WAL; retention purge job (`SEC-7`)
@@ -360,11 +412,26 @@ criterion holds.
    (a local web page over Tailscale, say) worth the extra moving part?
 3. Standing authorizations (`approve-except`) were left open in the original
    conversation. Which concrete case justifies one, if any?
-4. Does the mail provider's DKIM setup actually allow signing from the box's own
+4. Identity: WhatsApp is migrating addressing from phone-number JIDs to LIDs, and
+   the two do not always map cleanly (WAHA carries open issues about exactly this
+   mismatch). The allowlist matches on identity, so getting this wrong means
+   either dropping wanted messages or, worse, matching an unintended one. Decide
+   what the allowlist keys on, and how a JID/LID change is detected rather than
+   silently re-matched.
+5. Does the mail provider's DKIM setup actually allow signing from the box's own
    domain, or does mail need to relay through the provider?
-5. Retention default: is 7 days right, or should content purge as soon as a
+6. Retention default: is 7 days right, or should content purge as soon as a
    candidate reaches a terminal state?
 
-## 10. Status
+## 10. References
+
+- [`tulir/whatsmeow`](https://github.com/tulir/whatsmeow) — the client library
+  ([package docs](https://pkg.go.dev/go.mau.fi/whatsmeow),
+  [`store/sqlstore`](https://pkg.go.dev/go.mau.fi/whatsmeow/store/sqlstore))
+- [`devlikeapro/waha`](https://github.com/devlikeapro/waha) (Apache-2.0) — the
+  GOWS engine's use of whatsmeow is the reference implementation for protocol
+  behaviour; [engine comparison](https://waha.devlike.pro/docs/how-to/engines/)
+
+## 11. Status
 
 Pre-implementation. This README is the specification; nothing in M0 is done yet.
