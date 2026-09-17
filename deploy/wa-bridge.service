@@ -1,0 +1,54 @@
+# /etc/systemd/system/wa-bridge.service
+#
+# Secrets come from EnvironmentFile, never from Environment= lines: unit files
+# are world-readable and `systemctl show` prints them (SEC-8).
+
+[Unit]
+Description=Instinct WhatsApp bridge
+Documentation=https://github.com/arielpts/instinct-whatsapp-bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wa-bridge
+Group=wa-bridge
+EnvironmentFile=/etc/wa-bridge/env
+ExecStart=/usr/local/bin/wa-bridge run
+WorkingDirectory=/var/lib/wa-bridge
+StateDirectory=wa-bridge
+StateDirectoryMode=0700
+UMask=0077
+
+# A linked device that stays down gets unlinked, so always come back.
+Restart=always
+RestartSec=5s
+
+# This process holds a WhatsApp session and other people's messages. Give it
+# the least it can run with.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

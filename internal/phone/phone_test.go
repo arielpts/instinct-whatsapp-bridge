@@ -66,7 +66,7 @@ func TestParseJID(t *testing.T) {
 		want string
 	}{
 		{"5511987654321@s.whatsapp.net", "5511987654321@s.whatsapp.net"},
-		{"5511987654321@c.us", "5511987654321@s.whatsapp.net"}, // legacy server normalises
+		{"5511987654321@c.us", "5511987654321@s.whatsapp.net"},              // legacy server normalises
 		{"5511987654321:12@s.whatsapp.net", "5511987654321@s.whatsapp.net"}, // device is not identity
 		{"5511987654321", "5511987654321@s.whatsapp.net"},
 		{"192837465@lid", "192837465@lid"},

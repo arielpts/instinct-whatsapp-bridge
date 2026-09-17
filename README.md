@@ -544,9 +544,14 @@ confirms the address exists — and logged as a count, not as content.
 Constraint: a linked device that stays offline long enough gets unlinked, so this
 must be genuinely always-on. That rules out a laptop.
 
-Recommended: a small **arm64 VPS**, Debian stable, ~€4–5/month (Hetzner CAX11 or
-equivalent). arm64 matches the `CGO_ENABLED=0` cross-compile target, and the
-cheapest tier is already several times the `OPS-1` budget. A Raspberry Pi at home
+Recommended: a small **arm64 VPS**, Debian stable — Hetzner CAX11, €5.99/month
+plus €0.50 for the primary IPv4 since the June 2026 price adjustment. arm64
+matches the `CGO_ENABLED=0` cross-compile target and is now the value tier
+outright, that adjustment having raised dedicated-vCPU plans far more steeply.
+Note that Hetzner offers arm64 only in Falkenstein, Nuremberg and Helsinki, so a
+box nearer Brazil means x86 and a larger bill. Either way the cheapest tier is
+several times the `OPS-1` budget. Step-by-step provisioning is in
+[`deploy/`](deploy/). A Raspberry Pi at home
 is equally viable technically — outbound-only means no router configuration — at
 the cost of home power and network flaps, which cost linked-device sessions.
 Free-tier ARM instances work but are evictable, and an evicted bridge is an
