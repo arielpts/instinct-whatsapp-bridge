@@ -1,0 +1,4 @@
+/wa-bridge
+*.db
+*.db-wal
+*.db-shm
