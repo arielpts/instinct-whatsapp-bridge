@@ -99,8 +99,9 @@ for all development.
   identified by its email address, whose local part is the contact's number by
   default or an HMAC of the JID under `address_style = "opaque"` (§6.3). Message
   identifiers are opaque in both modes. The raw JID never leaves the box; what
-  leaves is the E.164 number, and only in the default mode. Identifiers live in
-  headers, not only in prose, so routing never depends on parsing text.
+  leaves is the E.164 number, and only in the default mode. Because the assistant
+  cannot set arbitrary headers, the binding identifier must also survive in the
+  `Subject` — so it is short, opaque and echo-friendly (`FR-13`).
 - **FR-4 — Reply ingestion.** The bridge polls the catch-all mailbox, routes each
   accepted email by its recipient address, extracts the message text (§7.2), and
   enqueues a candidate outbound message.
@@ -115,7 +116,16 @@ for all development.
   bridge accepts and logs drafts but can send nothing. This is the default mode
   and the mode used for the first rollout phase.
 - **FR-9 — Deduplication.** A retried or replayed reply email must not produce a
-  second WhatsApp message.
+  second WhatsApp message, and a partially delivered candidate is never
+  auto-retried (§7.3).
+- **FR-12 — Multi-bubble messages.** One candidate may carry several WhatsApp
+  messages, separated in the body. Capped in count and length, approved as a
+  unit, counted individually against quota, delivered in order (§7.3).
+- **FR-13 — Subject token.** Every forward carries an opaque `[wa:…]` token in its
+  subject, mapping to conversation and message on the box. The assistant controls
+  `To`, `CC`, `BCC`, `Reply-To`, subject and standard threading, but cannot set
+  arbitrary headers — so the token, not a custom header, is what a reply echoes
+  back. It contains no phone number and no message content.
 
 ### 4.2 Security
 
@@ -124,16 +134,24 @@ for all development.
   Changing the allowlist requires editing config on the box and a restart —
   it is never changeable by email or by message.
 - **SEC-2 — Authenticated email in both directions.** Forwards are DKIM-signed and
-  carry an HMAC over their canonical fields inside the `Message-ID` (§7.1).
-  Inbound mail is accepted only if DKIM verifies with a `d=` matching Instinct's
-  sending domain *and* the `From` matches the single configured assistant
-  address. Both, or the mail is dropped and logged. A threaded reply must
-  additionally carry an `In-Reply-To` whose HMAC verifies and has not been seen
-  before; a first-contact email without `In-Reply-To` is allowed but is never
-  treated as a reply.
+  carry an HMAC in both the subject token and the `Message-ID` (§7.1). Inbound
+  mail is accepted only if every one of these holds: the `From` is the single
+  configured assistant address; DKIM verifies with a `d=` on the Instinct
+  allowlist (`SEC-14`); and the `[wa:…]` token verifies as an HMAC we issued and
+  has not been redeemed before. Anything else is dropped and logged.
+- **SEC-14 — Instinct sender allowlist.** The accepted sender is pinned by an
+  explicit allowlist, not inferred: exact `From` addresses, permitted DKIM `d=`
+  domains, permitted envelope/return-path domains, and — if Instinct publishes
+  them — sending IP ranges. Empty by default; nothing is accepted until it is
+  filled in from observed real mail.
+  Authentication results are trusted only from the `Authentication-Results`
+  header our own provider stamped on delivery, identified by its `authserv-id`.
+  Any such header already present in the message is stripped before evaluation,
+  because a sender can write those headers themselves.
 - **SEC-3 — Visible confirmation before sending.** Approval requests state the
   resolved recipient (display name *and* the identifier) and the exact bytes to
-  be sent. No abbreviation, no rendering that could hide trailing content.
+  be sent — every bubble, numbered, in order. No abbreviation, no rendering that
+  could hide trailing content, no approving part of a candidate.
 - **SEC-4 — Content is never control.** Routing is taken from envelope headers
   only. A message's recipient comes from the address the assistant replied to,
   never from text — so no string a third party can write, anywhere in a body, can
@@ -151,12 +169,17 @@ for all development.
   ambiguity rejects the candidate. Mailers append; a bridge that forwards a whole
   body eventually quotes a contact's own message back at them, with the
   authenticator attached.
+- **SEC-13 — Two-channel agreement.** A reply names its destination twice — the
+  address it was sent to, and the token it echoes. They must resolve to the same
+  conversation, and exactly one recipient may lie in our domain. Disagreement
+  rejects; multiple recipients reject rather than fan out (§7.2).
 - **SEC-5 — Kill switch.** A single action stops all sending immediately:
   `touch PANIC` in the state directory, a `systemctl stop`, or an approval-channel
   command word. The switch fails closed — if the bridge cannot determine that
   sending is permitted, it does not send.
-- **SEC-6 — Quotas.** Hard per-conversation and per-day send caps. Exceeding a cap
-  is a hard stop requiring owner intervention, not a delay.
+- **SEC-6 — Quotas.** Hard per-conversation and per-day send caps, counted in
+  bubbles rather than candidates. Exceeding a cap is a hard stop requiring owner
+  intervention, not a delay.
 - **SEC-7 — Minimal retention.** Message bodies are retained for a configurable
   window (default 7 days) then purged; the audit log keeps identifiers, hashes
   and outcomes indefinitely, but not the content. Third parties' messages are
@@ -216,11 +239,11 @@ for all development.
   │  poller (IMAP)    │ ◄───────────────────────┘  catch-all
   └────────┬──────────┘
            ▼
-  ┌───────────────────┐   DKIM + sender; drop silently (SEC-2, SEC-11)
+  ┌───────────────────┐   allowlist + DKIM; drop silently (SEC-2, SEC-14)
   │  verifier         │
   └────────┬──────────┘
            ▼
-  ┌───────────────────┐   route by address; strip quotes (SEC-4, SEC-12)
+  ┌───────────────────┐   token + address must agree (SEC-13)
   │  text extractor   │
   └────────┬──────────┘
            ▼
@@ -229,7 +252,7 @@ for all development.
   └────────┬──────────┘
            ▼
   ┌───────────────────┐   quotas, kill switch, dedup (SEC-5, SEC-6, FR-9)
-  │  sender           │
+  │  sender (bubbles) │
   └────────┬──────────┘
            ▼
      WhatsApp send          →  audit log (OPS-3) at every arrow
@@ -366,9 +389,9 @@ WhatsApp contact  ↔  5511987654321@wa.example.com  ↔  assistant@mail.instinc
 ```
 From:       "Marina" <5511987654321@wa.example.com>
 To:         assistant@mail.instinct.com
-Subject:    Marina (+55 11 98765-4321)
+Subject:    [wa:7f3a91c2] Marina (+55 11 98765-4321)
 Message-ID: <m.0192bd4c.9f2ca817e3b4@wa.example.com>
-X-WA-Message:   m_0192bd4c
+X-WA-Message:   m_0192bd4c          <- convenience only, never depended on
 X-WA-Timestamp: 2026-09-17T20:05:11Z
 X-WA-Mode:      draft-only
 
@@ -377,21 +400,49 @@ X-WA-Mode:      draft-only
 oi, consegue me mandar o contrato ainda hoje?
 ```
 
-The `Message-ID` is the authenticator: `m.<message id>.<HMAC>`, the HMAC taken
-over conversation, message and timestamp under the box's key. A reply carries it
-back in `In-Reply-To` for free, which is what binds the reply to this message and
-what makes replay detectable (`SEC-2`, `FR-9`).
+**The subject token is the binding.** `[wa:7f3a91c2]` is a truncated HMAC over
+conversation, message and timestamp under the box's key, resolved through a local
+map. It is opaque: no phone number, no content, nothing that means anything off
+this box. It goes in the subject because that is what the assistant can reliably
+read and reliably echo.
+
+The `X-WA-*` headers are there for debugging and for any other client, and
+nothing depends on them. The assistant can set `To`, `CC`, `BCC`, `Reply-To` and
+standard threading, but **not arbitrary headers** — so a protocol that needed
+`X-WA-Conversation` on the way back would not work at all. `Message-ID` still
+carries the same HMAC, so `In-Reply-To` corroborates the token when threading
+survives, but it is never the only binding.
 
 The `From` display name is the contact's name; the local part is the number. One
-message, one email — no digests, so a reply can never be ambiguous about which
+message, one email — no digests, so a reply is never ambiguous about which
 message it answers.
 
 ### 7.2 Reply (assistant → bridge)
 
-Any mail to `<number>@wa.example.com` from the configured assistant address becomes
-a candidate message to that number. A reply to a forward is the normal case; mail
-with no `In-Reply-To` is accepted too, as a new message rather than a threaded
-reply, and is subject to the same allowlist and the same approval.
+A reply names its destination twice, and the two must agree:
+
+| Channel | Carries | Source |
+|---|---|---|
+| `To:` address | which contact | the address the assistant replied to |
+| `[wa:…]` token | which conversation and message | echoed from the subject, or the first body line |
+
+**SEC-13 — Two-channel agreement.** The token is authoritative and the address is
+the cross-check. If the token resolves to one conversation and the address to
+another, the candidate is rejected — never silently preferred one way. Sending to
+the wrong person then requires two independent failures rather than one typo.
+Exactly one recipient may lie in our domain; a reply addressed to two contacts is
+rejected outright rather than fanned out, because quiet fan-out is precisely the
+"envio fora do escopo" this project exists to prevent.
+
+The token is read from the `Subject`, or failing that from the first non-empty
+line of the body. A token found anywhere else is ignored — and, since it should
+not be there, treated as a leaked-identifier rejection under `SEC-12`. Tokens are
+verified as HMACs, not merely looked up, so a token appearing inside quoted
+contact text cannot resolve to anything.
+
+Mail with a valid token but no `In-Reply-To` is normal, not suspicious. Mail with
+neither token nor thread is accepted only as a first message to an allow-listed
+address, and never qualifies for any standing authorization.
 
 The body is the message. Extraction is strict, because an email body is not just
 what someone typed (`SEC-12`):
@@ -401,17 +452,54 @@ what someone typed (`SEC-12`):
 - The remainder is trimmed and must be non-empty plain text. HTML parts are
   ignored in favour of `text/plain`; if only HTML exists, the candidate is
   rejected rather than converted.
-- The result is scanned for our own identifiers — HMACs, `Message-ID`s, headers,
-  nonces. A hit rejects the candidate. Quoting our forward back at the contact
-  would leak the authenticator that lets someone forge the next one.
+- The result is scanned for our own identifiers — HMACs, `Message-ID`s, header
+  names, tokens. A hit rejects the candidate. Quoting our forward back at the
+  contact would leak the authenticator that signs the next one.
 - Ambiguous extraction rejects. It never sends the whole body and hopes.
 
-### 7.3 Status (bridge → assistant)
+### 7.3 Bubbles
 
-On the same thread: `status: sent | rejected | expired | failed`, with the new
-message identifier on success, or the reason otherwise — including the
-extraction failures above, so a rejected draft can be rewritten rather than
-silently lost.
+WhatsApp is written in several short messages, not one paragraph, and the
+assistant can split a reply to match. A body may carry separators:
+
+```
+[wa:7f3a91c2]
+---bubble---
+Consigo sim.
+---bubble---
+Te mando até as 18h.
+```
+
+**FR-12 — Multi-bubble messages.** A line that is exactly `---bubble---` splits
+the extracted text; no separator means one bubble. Each bubble is trimmed and
+must be non-empty, there is a hard cap on count (default 5) and on length, and
+exceeding either rejects the whole candidate rather than truncating it.
+
+The separator is parsed only in text that survived extraction, never in
+forwarded contact content — a contact who writes `---bubble---` at you cannot
+reach the splitter, and even if they could, splitting changes nothing about
+where a message goes (§7.2 settles that).
+
+The consequences are spelled out because "one candidate, many messages" breaks
+several earlier assumptions:
+
+- **Approval** shows every bubble, numbered, in order, exactly as it will be
+  sent. Approval is all-or-nothing; there is no approving bubble 1 of 3 (`SEC-3`).
+- **Quotas** count bubbles, not candidates. Five bubbles spend five (`SEC-6`).
+- **Delivery** is sequential, with each bubble's state recorded before and after
+  it goes out, and a short pause between them so a reply does not land as a burst.
+- **Partial failure** stops. If bubble 3 of 5 fails, the candidate ends
+  `partial`, reports how many were delivered, and is never auto-retried — a retry
+  of a partially-sent candidate duplicates the bubbles that already arrived
+  (`FR-9`).
+
+### 7.4 Status (bridge → assistant)
+
+On the same thread, subject token included so it can be matched without headers:
+`status: sent | partial | rejected | expired | failed`, with the new message
+identifiers on success, the delivered count on `partial`, and the reason
+otherwise — including the extraction and agreement failures above, so a rejected
+draft can be rewritten rather than silently lost.
 
 ## 8. Deployment
 
@@ -487,13 +575,24 @@ imap_host = "imap.provider.net"
 smtp_host = "smtp.provider.net"        # submission, port 587
 
 # the assistant: the only sender we accept, the only recipient we send to
-assistant_address     = "assistant@mail.instinct.com"
-assistant_dkim_domain = "mail.instinct.com"   # DKIM d= must match
+assistant_address = "assistant@mail.instinct.com"
+
+# SEC-14 — empty until filled in from observed real mail; nothing is accepted
+# while it is empty. authserv_id names OUR provider, the only stamp we trust.
+[instinct]
+from_addresses   = ["assistant@mail.instinct.com"]
+dkim_domains     = ["mail.instinct.com"]
+envelope_domains = ["mail.instinct.com"]
+ip_ranges        = []                      # only if Instinct publishes them
+authserv_id      = "mx.provider.net"
 
 [limits]
-per_conversation_per_hour = 5
+per_conversation_per_hour = 5    # counted in bubbles, not candidates
 per_day_total             = 30
 inbound_mail_per_hour     = 60   # catch-all abuse cap (SEC-11)
+bubbles_per_candidate     = 5
+chars_per_bubble          = 4096
+bubble_pause_ms           = 1200
 
 [[conversation]]
 number  = "+55 11 98765-4321"                # as a human writes it
@@ -536,8 +635,9 @@ criterion holds.
 - [ ] `@c.us` / `@s.whatsapp.net` normalization on input (§6.1)
 - [ ] Address ↔ conversation mapping, both `address_style` modes (`FR-3`, `FR-11`)
 - [ ] SQLite schema + WAL; retention purge job (`SEC-7`)
-- [ ] SMTP forward: number-as-sender, display name, signed `Message-ID`
-      (`FR-2`, `SEC-2`)
+- [ ] SMTP forward: number-as-sender, display name, subject token, signed
+      `Message-ID` (`FR-2`, `FR-13`, `SEC-2`)
+- [ ] Token issue/redeem map with single-use semantics
 - [ ] JSONL audit log (`OPS-3`)
 - [ ] systemd unit, `0600` secrets file, service user (`OPS-2`, `SEC-8`)
 - **Exit:** one allow-listed conversation forwards correctly for a week; no path
@@ -545,7 +645,12 @@ criterion holds.
 
 ### M2 — Drafting, still no sending
 - [ ] IMAP poller over the catch-all; routing by recipient address (`FR-4`)
-- [ ] Verifier: DKIM `d=` + sender identity; silent drop and counting (`SEC-2`, `SEC-11`)
+- [ ] Instinct sender allowlist; trust only our provider's `Authentication-Results`
+      by `authserv-id`, stripping any pre-existing copies (`SEC-14`)
+- [ ] Verifier: allowlist + DKIM + token redemption; silent drop and counting
+      (`SEC-2`, `SEC-11`)
+- [ ] Two-channel agreement and single-recipient enforcement (`SEC-13`)
+- [ ] Bubble splitting with count and length caps (`FR-12`)
 - [ ] Text extraction: reply marker, quote and signature stripping, HTML-only
       rejection, identifier leak scan (`SEC-12`) — fuzzed against real mailer output
 - [ ] Candidate queue persisted, with dedup (`FR-4`, `FR-9`)
@@ -555,13 +660,17 @@ criterion holds.
 
 ### M3 — Sending, one test conversation
 - [ ] Approval queue with one-time tokens and full recipient + text display (`SEC-3`, `FR-5`)
-- [ ] Sender with quotas and hard-stop behaviour (`FR-6`, `SEC-6`)
+- [ ] Sender with quotas in bubbles and hard-stop behaviour (`FR-6`, `SEC-6`)
+- [ ] Sequential bubble delivery, per-bubble state, `partial` on failure, no
+      auto-retry (`FR-12`, `FR-9`)
 - [ ] Kill switch: PANIC file, service stop, command word; fail-closed (`SEC-5`)
 - [ ] Candidate expiry (default 15 min) and idempotent delivery
 - [ ] Adversarial test suite: replayed `In-Reply-To`, forged sender, DKIM `d=`
       mismatch, mail to a non-allow-listed number, a contact whose message
       impersonates an instruction or an email header, ninth-digit variant of an
-      allow-listed number, approval without token, body that quotes our own HMAC
+      allow-listed number, approval without token, body that quotes our own HMAC,
+      token/address disagreement, reply addressed to two contacts, replayed
+      token, contact text containing `---bubble---`
 - **Exit:** sending works in exactly one test conversation, with every
   adversarial test failing closed.
 
@@ -597,10 +706,12 @@ criterion holds.
    `assistant@mail.instinct.com`, and what DKIM `d=` domain does its outbound
    mail carry? SEC-2 pins the accepted sender to exactly that, so this must be
    observed from a real message rather than assumed.
-6. Does Instinct's mail preserve `In-Reply-To` on replies? The whole binding and
-   replay story rests on it. If it does not, the fallback is sub-addressing the
-   HMAC into the local part (`5511987654321+9f2c…@wa.example.com`), which survives
-   any mailer but is uglier.
+6. Does Instinct publish sending IP ranges, or a stable envelope domain, to make
+   `SEC-14` tighter than an address plus a DKIM `d=`? Until then the allowlist
+   starts empty and is filled from a real message.
+   *(Settled: arbitrary headers are impossible on the assistant's side, and
+   `In-Reply-To` is no longer load-bearing — the subject token carries the
+   binding, which is why `FR-13` exists.)*
 7. Reply-marker discipline: assistant replies that quote the forward are handled
    by §7.2, but a mailer that indents rather than quotes will defeat stripping.
    Worth observing what Instinct's mail actually looks like before finalizing the
