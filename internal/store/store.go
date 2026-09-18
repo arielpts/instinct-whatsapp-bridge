@@ -74,19 +74,39 @@ func Open(ctx context.Context, path, domain string) (*Store, error) {
 	return s, nil
 }
 
+// bindDomain ties the state to a mail domain, once one exists.
+//
+// The operator commands run before any mail is configured, so an empty domain
+// has to mean "not yet" rather than a domain literally named "". Binding the
+// empty string would make the database refuse to open the moment a real domain
+// was configured -- taking the linked device with it, since the pairing lives
+// in the same file.
 func (s *Store) bindDomain(ctx context.Context, domain string) error {
 	var stored string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'mail_domain'`).Scan(&stored)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
+		if domain == "" {
+			return nil // nothing to bind yet
+		}
 		_, err = s.db.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES ('mail_domain', ?)`, domain)
 		return err
 	case err != nil:
 		return err
-	case stored != domain:
+	case stored == domain:
+		return nil
+	case domain == "":
+		// An operator command on a box that does have a domain: adopt it, so
+		// tokens stay scoped correctly.
+		s.domain = stored
+		return nil
+	case stored == "":
+		// Bound before mail existed. Adopt the real domain now.
+		_, err = s.db.ExecContext(ctx, `UPDATE meta SET value = ? WHERE key = 'mail_domain'`, domain)
+		return err
+	default:
 		return fmt.Errorf("%w: state is %s, configured %s", ErrWrongDomain, stored, domain)
 	}
-	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

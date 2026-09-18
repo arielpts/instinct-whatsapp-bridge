@@ -19,6 +19,7 @@ import (
 const usage = `wa-bridge -- Instinct WhatsApp bridge
 
   pair <number>     link this box to a WhatsApp account by typed code
+  unpair            forget the local device so pairing can start over
   signup <number>   resolve a phone number to the JID WhatsApp really uses
   status            report what is linked, configured and queued
   run               forward allow-listed messages and process replies
@@ -39,6 +40,8 @@ func main() {
 	switch os.Args[1] {
 	case "pair":
 		err = pair(ctx, arg(2))
+	case "unpair":
+		err = unpair(ctx)
 	case "signup":
 		err = signup(ctx, arg(2))
 	case "status":
@@ -132,6 +135,20 @@ func pair(ctx context.Context, number string) error {
 	}
 }
 
+func unpair(ctx context.Context) error {
+	st, client, err := open(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if err := client.Unpair(ctx); err != nil {
+		return err
+	}
+	fmt.Println("\n  Local device forgotten. Run `wa-bridge pair <number>` to link again.")
+	fmt.Println("  If the phone still lists this device, remove it there too.")
+	return nil
+}
+
 func signup(ctx context.Context, number string) error {
 	if number == "" {
 		return errors.New("usage: wa-bridge signup <number>")
@@ -176,10 +193,15 @@ func status(ctx context.Context) error {
 	defer st.Close()
 
 	fmt.Println()
+	// This reads the local device store, not the account. A pairing that the
+	// server accepted but that never finished attaching leaves a device here
+	// that the phone does not list, so do not call it linked outright.
 	if jid, err := client.LinkedJID(); err != nil {
-		fmt.Printf("  whatsapp   not linked -- run `wa-bridge pair <number>`\n")
+		fmt.Printf("  whatsapp   no device stored -- run `wa-bridge pair <number>`\n")
 	} else {
-		fmt.Printf("  whatsapp   linked as %s\n", jid)
+		fmt.Printf("  whatsapp   device stored: %s\n", jid)
+		fmt.Printf("             confirm it appears under Linked Devices on the phone;\n")
+		fmt.Printf("             if it does not, run `wa-bridge unpair` and pair again\n")
 	}
 
 	// The policy file is optional here on purpose: status should still report

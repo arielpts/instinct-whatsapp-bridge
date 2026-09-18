@@ -224,3 +224,45 @@ func TestExpirePending(t *testing.T) {
 		t.Errorf("state = %q, want expired", state)
 	}
 }
+
+// Operator commands run before any mail exists, so an empty domain means "not
+// yet". Binding it literally would lock the operator out of their own state --
+// and the linked device lives in the same file.
+func TestEmptyDomainDoesNotLockTheStore(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	// pair and status, before any mail settings.
+	s, err := Open(ctx, path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	// Mail gets configured later; the state must still open.
+	s, err = Open(ctx, path, "wa.example.com")
+	if err != nil {
+		t.Fatalf("configuring a domain locked the existing state: %v", err)
+	}
+	tok, err := s.IssueToken(ctx, key, "c_1", "m_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	// An operator command afterwards adopts the stored domain rather than
+	// clearing it, so tokens issued under it still redeem.
+	s, err = Open(ctx, path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.RedeemToken(ctx, key, tok); err != nil {
+		t.Errorf("token issued under the configured domain no longer redeems: %v", err)
+	}
+	// A genuinely different domain is still refused.
+	s.Close()
+	if _, err := Open(ctx, path, "other.example.net"); !errors.Is(err, ErrWrongDomain) {
+		t.Errorf("a different domain was accepted: %v", err)
+	}
+}

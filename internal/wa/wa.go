@@ -58,11 +58,12 @@ type Allower interface {
 }
 
 type Client struct {
-	wm      *whatsmeow.Client
-	allow   Allower
-	onMsg   func(Inbound)
-	log     waLog.Logger
-	dropped uint64 // history-sync payloads discarded, for the audit line
+	wm        *whatsmeow.Client
+	container *sqlstore.Container
+	allow     Allower
+	onMsg     func(Inbound)
+	log       waLog.Logger
+	dropped   uint64 // history-sync payloads discarded, for the audit line
 
 	loggedIn  chan struct{}
 	loginOnce sync.Once
@@ -94,7 +95,12 @@ func Open(ctx context.Context, db *sql.DB, logLevel string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wa: device store: %w", err)
 	}
-	c := &Client{wm: whatsmeow.NewClient(device, log), log: log, loggedIn: make(chan struct{})}
+	c := &Client{
+		wm:        whatsmeow.NewClient(device, log),
+		container: container,
+		log:       log,
+		loggedIn:  make(chan struct{}),
+	}
 	c.wm.AddEventHandler(c.handle)
 	return c, nil
 }
@@ -114,6 +120,19 @@ func (c *Client) LinkedJID() (types.JID, error) {
 		return types.JID{}, ErrNotLinked
 	}
 	return *c.wm.Store.ID, nil
+}
+
+// Unpair forgets the local device.
+//
+// The device store can hold a device the account does not: a pairing that the
+// server accepted but that never finished attaching leaves one behind, and
+// then every later connect fails against credentials WhatsApp has discarded.
+// Clearing it is the way back to a clean pair.
+func (c *Client) Unpair(ctx context.Context) error {
+	if c.wm.Store.ID == nil {
+		return ErrNotLinked
+	}
+	return c.container.DeleteDevice(ctx, c.wm.Store)
 }
 
 // DroppedHistorySyncs is the count of history-sync payloads discarded, so the
