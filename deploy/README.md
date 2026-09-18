@@ -31,6 +31,15 @@ In the console: **New project** → `instinct-bridge` → **Add server**.
 Backups (+20%) are worth it: the volume holds the linked-device session, and
 losing it means re-pairing from the phone.
 
+## Without a terminal
+
+A server can prepare itself. On the creation page, paste
+[`cloud-config.yaml`](cloud-config.yaml) into the **Cloud config** field
+(under additional features) and the box runs the bootstrap on first boot --
+no console, no SSH client.
+
+A terminal is still needed later, for pairing and for reading the journal.
+
 ## First login
 
 ```sh

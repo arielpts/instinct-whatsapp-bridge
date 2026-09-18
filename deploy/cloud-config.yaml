@@ -1,0 +1,8 @@
+#cloud-config
+# Paste into the "Cloud config" field when creating a Hetzner server. The box
+# prepares itself on first boot, so no terminal is needed to set it up.
+#
+# It fetches deploy/bootstrap.sh from this repository -- read that first; it
+# runs as root.
+runcmd:
+  - curl -fsSL https://raw.githubusercontent.com/arielpts/instinct-whatsapp-bridge/main/deploy/bootstrap.sh | bash
