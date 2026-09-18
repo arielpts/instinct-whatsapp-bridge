@@ -159,10 +159,13 @@ for all development.
   redirect a message, name a different contact, or change a permission. Bodies
   are payload and nothing else: there is no command vocabulary to parse, and
   therefore none to inject.
-- **SEC-11 — Catch-all hardening.** The bridge's domain accepts every local part
-  by design, which invites dictionary spam. Mail failing SEC-2 is dropped without
-  a bounce (a bounce confirms the address) and recorded as a count, not as
-  content. Accepted mail is rate-limited independently of the send quotas.
+- **SEC-11 — Catch-all hardening.** A domain that accepts every local part
+  invites dictionary spam, so the pattern is narrowed at the provider first:
+  conversation addresses are E.164 digits, and a rule matching only those refuses
+  `info@` and the rest before anything is stored. What still arrives and fails
+  SEC-2 is dropped without a bounce (a bounce confirms the address) and recorded
+  as a count, not as content. Accepted mail is rate-limited independently of the
+  send quotas.
 - **SEC-12 — Nothing is sent that the assistant did not write.** Outbound text is
   extracted, never taken wholesale: quoted history, signatures and everything
   below the reply marker are stripped, HTML-only bodies are rejected rather than

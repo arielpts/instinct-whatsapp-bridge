@@ -50,10 +50,20 @@ could break.
 Three DKIM selectors exist so the provider can rotate signing keys without an
 outage. Publish all three.
 
-Then, in the provider's admin: create one mailbox (`bridge@wa.example.com`) and
-set the domain to **catch-all** to it. That single mailbox receives mail for
-every conversation address, and the bridge routes by the recipient it was sent
-to.
+Then, in the provider's admin: create one mailbox (`bridge@wa.example.com`),
+permit **wildcard sending** from it so forwards can come from each
+conversation's address, and route incoming mail for every conversation address
+into it.
+
+In Migadu that routing is a **Rewrite**, not an Alias -- aliases are exact
+addresses, rewrites match a pattern against the local part.
+
+Narrow the pattern rather than catching everything. Conversation addresses are
+E.164 digits, so a pattern like `55*` accepts exactly those and refuses
+`info@`, `sales@` and the rest of the dictionary-spam surface at the provider's
+edge, before any of it is stored. That is `SEC-11` served better than the
+bridge could serve it: a bare `*` would accept all of it and leave the bridge
+to drop it afterwards. Add a rule per country code as contacts require one.
 
 ## Doing it with the Cloudflare API
 
