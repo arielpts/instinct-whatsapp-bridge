@@ -16,6 +16,11 @@ import (
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/wa"
 )
 
+// version is stamped at build time. Without it there is no way to tell a stale
+// binary from a current one, and a CDN that caches a branch URL for a few
+// minutes will hand you a stale one with a checksum that matches it.
+var version = "dev"
+
 const usage = `wa-bridge -- Instinct WhatsApp bridge
 
   pair <number>     link this box to a WhatsApp account by typed code
@@ -24,6 +29,7 @@ const usage = `wa-bridge -- Instinct WhatsApp bridge
   signup <number>   resolve a phone number to the JID WhatsApp really uses
   status            report what is linked, configured and queued
   run               forward allow-listed messages and process replies
+  version           print the build this binary was made from
 
 Configuration comes from the environment and the policy file; see README 9.
 `
@@ -45,6 +51,9 @@ func main() {
 		err = unpair(ctx)
 	case "prune":
 		err = prune(ctx)
+	case "version", "--version", "-v":
+		fmt.Println(version)
+		return
 	case "signup":
 		err = signup(ctx, arg(2))
 	case "status":
