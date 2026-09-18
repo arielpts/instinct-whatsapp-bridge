@@ -147,6 +147,19 @@ func (c *Config) Lookup(alias string) (Conversation, bool) {
 
 func env(key string) string { return strings.TrimSpace(os.Getenv(key)) }
 
+// StateDir is the one setting the operator commands need.
+//
+// Pairing and status must work before any mail exists: a box that cannot link
+// its WhatsApp account until an IMAP host is configured would make the first
+// step wait on the last one.
+func StateDir() (string, error) {
+	dir := env("WA_BRIDGE_STATE_DIR")
+	if dir == "" {
+		return "", errors.New("config: WA_BRIDGE_STATE_DIR is unset")
+	}
+	return dir, nil
+}
+
 // Load reads the environment, then the policy file it points at, and returns a
 // validated configuration or an explanation of why the bridge will not start.
 func Load() (*Config, error) {

@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -57,7 +58,16 @@ type Client struct {
 	onMsg   func(Inbound)
 	log     waLog.Logger
 	dropped uint64 // history-sync payloads discarded, for the audit line
+
+	loggedIn  chan struct{}
+	loginOnce sync.Once
 }
+
+// LoggedIn closes once the device is linked, so pairing can wait for the
+// account to confirm rather than guessing that typing the code worked.
+func (c *Client) LoggedIn() <-chan struct{} { return c.loggedIn }
+
+func (c *Client) markLoggedIn() { c.loginOnce.Do(func() { close(c.loggedIn) }) }
 
 // Open builds a client over an existing database handle.
 //
@@ -74,7 +84,7 @@ func Open(ctx context.Context, db *sql.DB, logLevel string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wa: device store: %w", err)
 	}
-	c := &Client{wm: whatsmeow.NewClient(device, log), log: log}
+	c := &Client{wm: whatsmeow.NewClient(device, log), log: log, loggedIn: make(chan struct{})}
 	c.wm.AddEventHandler(c.handle)
 	return c, nil
 }
@@ -145,6 +155,14 @@ func (c *Client) handle(evt any) {
 
 	case *events.Message:
 		c.handleMessage(e)
+
+	case *events.PairSuccess:
+		c.markLoggedIn()
+
+	case *events.Connected:
+		if c.wm.Store.ID != nil {
+			c.markLoggedIn()
+		}
 
 	case *events.LoggedOut:
 		// Degrade to "forwards stop", loudly. Silent inactivity is the failure

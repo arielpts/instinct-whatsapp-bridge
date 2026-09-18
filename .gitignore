@@ -2,3 +2,5 @@
 *.db
 *.db-wal
 *.db-shm
+/wa-bridge.amd64
+/wa-bridge.arm64

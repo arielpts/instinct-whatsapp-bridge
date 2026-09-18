@@ -56,8 +56,10 @@ func Open(ctx context.Context, path, domain string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
-	// One writer; SQLite is happier and the bridge has no need for more.
-	db.SetMaxOpenConns(1)
+	// Not one connection: whatsmeow shares this handle and issues queries
+	// inside its own transactions, which on a single connection deadlocks.
+	// WAL plus busy_timeout handles the concurrency instead.
+	db.SetMaxOpenConns(8)
 
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		db.Close()
@@ -88,6 +90,10 @@ func (s *Store) bindDomain(ctx context.Context, domain string) error {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// SQL exposes the handle so whatsmeow's device store can live in the same
+// file: one database to back up, one to restore.
+func (s *Store) SQL() *sql.DB { return s.db }
 
 func (s *Store) unix() int64 { return s.now().Unix() }
 
