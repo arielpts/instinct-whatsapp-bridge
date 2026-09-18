@@ -62,6 +62,11 @@ all eight records in one run. Give it a token scoped to **Zone:DNS:Edit on that
 zone only**, and run it somewhere you control -- the bridge's own box is fine.
 Re-running updates rather than duplicates.
 
+Cloudflare has two kinds of token. A user token verifies at
+`/user/tokens/verify`; an **account-owned** token, prefixed `cfat_`, verifies
+only at `/accounts/<id>/tokens/verify` and is rejected by the user endpoint.
+For one of those, set `CF_ACCOUNT_ID` too.
+
 ## Verifying
 
 ```sh

@@ -9,6 +9,7 @@
 # first argument:
 #
 #   CF_API_TOKEN    Zone:DNS:Edit on this zone only            (required)
+#   CF_ACCOUNT_ID   required for account-owned tokens (cfat_)  (see below)
 #   ZONE            the apex, as Cloudflare names the zone     (required)
 #   SUB             the bridge subdomain label, e.g. wa        (required)
 #   DMARC_RUA       an address for DMARC reports               (default: postmaster@ZONE)
@@ -46,15 +47,44 @@ command -v jq >/dev/null || { apt-get update -qq && apt-get install -y -qq jq; }
 
 cf() { curl -sS -H "Authorization: Bearer ${CF_API_TOKEN}" -H "Content-Type: application/json" "$@"; }
 
+# Cloudflare has two kinds of token and they verify at different endpoints.
+# An account-owned token (cfat_ prefix) is rejected by /user/tokens/verify --
+# not because it is invalid, but because that endpoint is for user tokens.
 echo "==> Verifying the token"
-cf "${API}/user/tokens/verify" | jq -e '.success' >/dev/null || {
-	echo "token rejected by Cloudflare" >&2
+case "${CF_API_TOKEN}" in
+cfat_*)
+	if [ -z "${CF_ACCOUNT_ID:-}" ]; then
+		echo "this is an account-owned token (cfat_); set CF_ACCOUNT_ID to the" >&2
+		echo "account it belongs to -- it cannot be verified without one" >&2
+		exit 1
+	fi
+	VERIFY_URL="${API}/accounts/${CF_ACCOUNT_ID}/tokens/verify"
+	;;
+*)
+	VERIFY_URL="${API}/user/tokens/verify"
+	;;
+esac
+
+VERIFY=$(cf "${VERIFY_URL}")
+if ! echo "$VERIFY" | jq -e '.success' >/dev/null; then
+	echo "token rejected by Cloudflare:" >&2
+	echo "$VERIFY" | jq -r '.errors[]? | "  \(.code): \(.message)"' >&2
 	exit 1
-}
+fi
+echo "    ok"
 
 echo "==> Finding zone ${ZONE}"
-ZONE_ID=$(cf "${API}/zones?name=${ZONE}" | jq -r '.result[0].id // empty')
-[ -n "$ZONE_ID" ] || { echo "no zone named ${ZONE} on this token" >&2; exit 1; }
+ZONES_URL="${API}/zones?name=${ZONE}"
+[ -n "${CF_ACCOUNT_ID:-}" ] && ZONES_URL="${ZONES_URL}&account.id=${CF_ACCOUNT_ID}"
+ZONES=$(cf "$ZONES_URL")
+ZONE_ID=$(echo "$ZONES" | jq -r '.result[0].id // empty')
+if [ -z "$ZONE_ID" ]; then
+	echo "no zone named ${ZONE} visible to this token" >&2
+	echo "$ZONES" | jq -r '.errors[]? | "  \(.code): \(.message)"' >&2
+	echo "  (the token needs Zone:Read as well as Zone:DNS:Edit)" >&2
+	exit 1
+fi
+echo "    ${ZONE_ID}"
 
 # upsert <type> <name> <content> [priority]
 upsert() {
