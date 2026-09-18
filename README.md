@@ -191,12 +191,20 @@ for all development.
   world-readable and `systemctl show` prints them), never command-line arguments
   (`/proc/*/cmdline` is world-readable), never the repository, never the logs.
   The environment is inherited by child processes, so the bridge execs nothing.
-- **SEC-9 — Discard history sync.** On pairing, WhatsApp pushes recent history
-  for *all* chats, not only allow-listed ones (whatsmeow surfaces this as
-  `*events.HistorySync`). It arrives ahead of any filter the natural design would
-  put in its way, so the handler drops it unconditionally and persists nothing.
-  Otherwise the bridge's very first act violates the "never mirror the whole
-  account" non-goal. Verified by test, not by inspection.
+- **SEC-9 — Discard history sync, then delete what the library kept.** On
+  pairing, WhatsApp pushes recent history for *all* chats, not only
+  allow-listed ones (whatsmeow surfaces this as `*events.HistorySync`). The
+  handler drops the payload unconditionally, so none of it is ever read.
+  That is not sufficient on its own, and the first real pairing proved it:
+  whatsmeow processes the payload **before** our handler runs and persists
+  parts of it to the device store — message secret keys, privacy tokens, and
+  push names for every contact it saw, two thousand of them on a live account.
+  Discarding the event stops us reading those names; it does not stop them
+  being on disk. So contact rows for anyone not allow-listed are deleted after
+  every sync (`wa-bridge prune`, and automatically after pairing), and the
+  operator is told the count rather than asked to take it on trust.
+  Crypto material for unread chats is left alone; names are the identifying
+  part and names are what goes.
 - **SEC-10 — Reading leaves no trace.** Read receipts and typing indicators are
   never emitted. Both are visible to the third party, and marking messages read
   silently alters the owner's own unread state on their phone. Reading is

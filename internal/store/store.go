@@ -12,6 +12,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -305,6 +306,50 @@ func (s *Store) SendsSince(ctx context.Context, conversation string, since time.
 		err = s.db.QueryRowContext(ctx,
 			`SELECT count(*) FROM sends WHERE conversation = ? AND sent_unix >= ?`,
 			conversation, since.Unix()).Scan(&n)
+	}
+	return n, err
+}
+
+// PruneContacts deletes whatsmeow's contact rows for anyone not allow-listed,
+// returning how many went.
+//
+// Dropping the *events.HistorySync payload is not enough on its own.
+// whatsmeow processes that payload before our handler ever sees it, and writes
+// push names into whatsmeow_contacts as it goes -- on a real account that is
+// thousands of names from chats the bridge was never granted. Discarding the
+// event stops us reading them; it does not stop them being on disk.
+//
+// Names are the identifying part, so they are what we remove. Run it after
+// every sync, not once.
+func (s *Store) PruneContacts(ctx context.Context, keep []string) (int64, error) {
+	query := `DELETE FROM whatsmeow_contacts`
+	args := make([]any, 0, len(keep))
+	if len(keep) > 0 {
+		placeholders := make([]string, len(keep))
+		for i, jid := range keep {
+			placeholders[i] = "?"
+			args = append(args, jid)
+		}
+		query += ` WHERE their_jid NOT IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		// The table only exists once whatsmeow has run its migrations.
+		if strings.Contains(err.Error(), "no such table") {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("store: pruning contacts: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// ContactCount reports how many contact rows are stored, so the operator can
+// see the number rather than take a claim on trust.
+func (s *Store) ContactCount(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM whatsmeow_contacts`).Scan(&n)
+	if err != nil && strings.Contains(err.Error(), "no such table") {
+		return 0, nil
 	}
 	return n, err
 }

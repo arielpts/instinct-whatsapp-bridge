@@ -266,3 +266,46 @@ func TestEmptyDomainDoesNotLockTheStore(t *testing.T) {
 		t.Errorf("a different domain was accepted: %v", err)
 	}
 }
+
+// Dropping the history-sync event does not stop whatsmeow writing contact
+// names to disk first, so they have to be removed rather than assumed absent.
+func TestPruneContacts(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, "wa.example.com")
+
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS whatsmeow_contacts (
+		our_jid TEXT, their_jid TEXT, first_name TEXT, full_name TEXT,
+		push_name TEXT, business_name TEXT, redacted_phone TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, jid := range []string{
+		"5511987654321@s.whatsapp.net", // allow-listed
+		"5521111111111@s.whatsapp.net", // swept up by history sync
+		"5531222222222@s.whatsapp.net",
+	} {
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO whatsmeow_contacts (our_jid, their_jid, push_name) VALUES ('me', ?, 'Somebody')`,
+			jid); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := s.PruneContacts(ctx, []string{"5511987654321@s.whatsapp.net"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("pruned %d, want 2", n)
+	}
+	if got, _ := s.ContactCount(ctx); got != 1 {
+		t.Errorf("%d contacts left, want 1", got)
+	}
+
+	// An empty allowlist means nobody is allowed, so nobody is kept.
+	if _, err := s.PruneContacts(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.ContactCount(ctx); got != 0 {
+		t.Errorf("%d contacts survived an empty allowlist", got)
+	}
+}

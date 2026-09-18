@@ -20,6 +20,7 @@ const usage = `wa-bridge -- Instinct WhatsApp bridge
 
   pair <number>     link this box to a WhatsApp account by typed code
   unpair            forget the local device so pairing can start over
+  prune             delete stored contacts for anyone not allow-listed
   signup <number>   resolve a phone number to the JID WhatsApp really uses
   status            report what is linked, configured and queued
   run               forward allow-listed messages and process replies
@@ -42,6 +43,8 @@ func main() {
 		err = pair(ctx, arg(2))
 	case "unpair":
 		err = unpair(ctx)
+	case "prune":
+		err = prune(ctx)
 	case "signup":
 		err = signup(ctx, arg(2))
 	case "status":
@@ -126,6 +129,19 @@ func pair(ctx context.Context, number string) error {
 		case <-time.After(15 * time.Second):
 		case <-ctx.Done():
 		}
+		// whatsmeow writes contact names from history sync before our handler
+		// can drop the payload, so remove them rather than assume they are not
+		// there. The allowlist is usually empty at this point, which means
+		// nobody is kept -- correct, not a bug.
+		var keep []string
+		if cfg, cerr := config.Load(); cerr == nil {
+			for _, c := range cfg.Conversations {
+				keep = append(keep, c.JID)
+			}
+		}
+		if n, perr := st.PruneContacts(ctx, keep); perr == nil && n > 0 {
+			fmt.Printf("  Pruned %d contact names stored during history sync.\n", n)
+		}
 		fmt.Printf("  Done. Check Linked Devices on the phone.\n\n")
 		return nil
 	case <-time.After(3 * time.Minute):
@@ -133,6 +149,40 @@ func pair(ctx context.Context, number string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// prune removes contact names whatsmeow persisted from history sync.
+//
+// Discarding the history-sync event stops the bridge reading other people's
+// conversations; it does not stop whatsmeow writing their names to disk first,
+// because it processes the payload before our handler runs.
+func prune(ctx context.Context) error {
+	dir, err := config.StateDir()
+	if err != nil {
+		return err
+	}
+	st, err := store.Open(ctx, filepath.Join(dir, "state.db"), os.Getenv("WA_BRIDGE_MAIL_DOMAIN"))
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	var keep []string
+	if cfg, err := config.Load(); err == nil {
+		for _, c := range cfg.Conversations {
+			keep = append(keep, c.JID)
+		}
+	}
+
+	before, _ := st.ContactCount(ctx)
+	n, err := st.PruneContacts(ctx, keep)
+	if err != nil {
+		return err
+	}
+	after, _ := st.ContactCount(ctx)
+	fmt.Printf("\n  contacts   %d stored, %d removed, %d kept (%d allow-listed)\n\n",
+		before, n, after, len(keep))
+	return nil
 }
 
 func unpair(ctx context.Context) error {
