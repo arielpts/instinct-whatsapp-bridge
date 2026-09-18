@@ -433,3 +433,31 @@ func (c *Config) Summary() string {
 		map[bool]string{true: "accepting", false: "ALLOWLIST EMPTY, accepting nothing"}[c.AcceptsInboundMail()],
 		c.RetentionDays)
 }
+
+// TestOptions builds a configuration in tests without a file or environment.
+type TestOptions struct {
+	MailDomain    string
+	Instinct      Instinct
+	Conversations []Conversation
+	Mode          Mode
+	Limits        Limits
+}
+
+// ForTest is exported for tests in other packages, which need a validated
+// configuration without inventing an environment for it.
+func ForTest(o TestOptions) (*Config, error) {
+	mode := o.Mode
+	if mode == "" {
+		mode = ModeApproveEach
+	}
+	c := &Config{
+		MailDomain: o.MailDomain, Mailbox: "bridge@" + o.MailDomain,
+		AssistantAddress: "assistant@example.test",
+		IMAPHost:         "imap.example.test", SMTPHost: "smtp.example.test",
+		HMACKey: make([]byte, minKeyLen), StateDir: "/tmp",
+	}
+	return build(c, File{
+		Mode: mode, Instinct: o.Instinct,
+		Limits: o.Limits, Conversations: o.Conversations,
+	}, "")
+}
