@@ -3,23 +3,41 @@
 #
 # Run it on a machine you control -- the VPS is fine. The token stays there.
 #
-#   export CF_API_TOKEN=...        # Zone:DNS:Edit on this zone only
-#   export ZONE=example.com        # the apex, as Cloudflare names the zone
-#   export SUB=wa                  # the bridge subdomain label
-#   export MIGADU_VERIFY=...       # hosted-email-verify value from admin.migadu.com
-#   export DMARC_RUA=you@example.com
-#   bash cloudflare-dns.sh
+#   bash cloudflare-dns.sh [env-file]
 #
-# Re-running is safe: an existing record with the same name and type is
-# updated rather than duplicated.
+# Settings come from the environment, or from a KEY=value file given as the
+# first argument:
+#
+#   CF_API_TOKEN    Zone:DNS:Edit on this zone only            (required)
+#   ZONE            the apex, as Cloudflare names the zone     (required)
+#   SUB             the bridge subdomain label, e.g. wa        (required)
+#   DMARC_RUA       an address for DMARC reports               (default: postmaster@ZONE)
+#   MIGADU_VERIFY   hosted-email-verify from admin.migadu.com  (optional)
+#
+# Without MIGADU_VERIFY everything except the ownership record is still
+# created, so DNS can propagate while the mailbox is being set up. Re-running
+# is safe: a record with the same name and type is updated, not duplicated.
 
 set -euo pipefail
 
-: "${CF_API_TOKEN:?set CF_API_TOKEN}"
+# An env file may hold the token, so do not let it be world-readable.
+if [ $# -ge 1 ]; then
+	[ -r "$1" ] || { echo "cannot read $1" >&2; exit 1; }
+	perms=$(stat -c %a "$1")
+	case "$perms" in
+	*[04]) ;;
+	*) echo "warning: $1 is mode $perms; chmod 600 it -- it holds a token" >&2 ;;
+	esac
+	set -a
+	# shellcheck disable=SC1090
+	. "$1"
+	set +a
+fi
+
+: "${CF_API_TOKEN:?set CF_API_TOKEN (or pass an env file holding it)}"
 : "${ZONE:?set ZONE, e.g. example.com}"
 : "${SUB:?set SUB, e.g. wa}"
-: "${MIGADU_VERIFY:?set MIGADU_VERIFY from admin.migadu.com}"
-: "${DMARC_RUA:?set DMARC_RUA, an address for reports}"
+DMARC_RUA="${DMARC_RUA:-postmaster@${ZONE}}"
 
 FQDN="${SUB}.${ZONE}"
 API="https://api.cloudflare.com/client/v4"
@@ -70,7 +88,12 @@ upsert MX "${FQDN}" "aspmx1.migadu.com" 10
 upsert MX "${FQDN}" "aspmx2.migadu.com" 20
 
 echo "==> Ownership and sending policy"
-upsert TXT "${FQDN}" "hosted-email-verify=${MIGADU_VERIFY}"
+if [ -n "${MIGADU_VERIFY:-}" ]; then
+	upsert TXT "${FQDN}" "hosted-email-verify=${MIGADU_VERIFY}"
+else
+	echo "    skipping ownership record: MIGADU_VERIFY is not set."
+	echo "    Add the domain at admin.migadu.com, then re-run with it."
+fi
 # -all, not ~all: this subdomain sends to exactly one recipient, so there is no
 # legitimate mail a hard fail could break, and it should never be spoofable.
 upsert TXT "${FQDN}" "v=spf1 include:spf.migadu.com -all"
