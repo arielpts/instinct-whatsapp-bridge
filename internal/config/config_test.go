@@ -227,3 +227,47 @@ func TestTrustsAuthservByDomain(t *testing.T) {
 		t.Error("an unset authserv domain trusted a stamp")
 	}
 }
+
+// WhatsApp may address a chat by phone-number JID or by LID, and which one
+// arrives can change. Matching a single form means a conversation quietly
+// stops matching one day, with nothing to report it.
+func TestMatchAcceptsEitherAddressingForm(t *testing.T) {
+	f := file()
+	f.Conversations = []Conversation{{
+		Number:  "+55 41 99906-4782",
+		JID:     "270565893996711@lid",
+		Aliases: []string{"270565893996711", "5541999064782", "554199064782"},
+		Label:   "Erich",
+		Actions: []string{ActionRead, ActionDraft},
+	}}
+	c, err := build(base(), f, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Whatever arrives, and in whatever order, one canonical answer.
+	for _, candidates := range [][]string{
+		{"270565893996711@lid"},                                 // LID-addressed
+		{"5541999064782@s.whatsapp.net"},                        // phone-addressed, ninth digit
+		{"554199064782@s.whatsapp.net"},                         // phone-addressed, without it
+		{"270565893996711@lid", "5541999064782@s.whatsapp.net"}, // both, LID first
+		{"5541999064782@s.whatsapp.net", "270565893996711@lid"}, // both, phone first
+		{"5500000000000@s.whatsapp.net", "270565893996711@lid"}, // an unrelated one first
+	} {
+		got, ok := c.Match(candidates)
+		if !ok {
+			t.Errorf("Match(%v) found nothing", candidates)
+			continue
+		}
+		if got != "270565893996711@lid" {
+			t.Errorf("Match(%v) = %q, want the canonical jid", candidates, got)
+		}
+	}
+
+	if _, ok := c.Match([]string{"5500000000000@s.whatsapp.net"}); ok {
+		t.Error("an unrelated chat matched")
+	}
+	if _, ok := c.Match(nil); ok {
+		t.Error("no candidates matched something")
+	}
+}

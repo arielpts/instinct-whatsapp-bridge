@@ -162,11 +162,26 @@ func (c *Config) AcceptsInboundMail() bool {
 	return len(c.Instinct.FromAddresses) > 0 && len(c.Instinct.DKIMDomains) > 0
 }
 
-// Allowed reports whether a chat may be read at all, satisfying wa.Allower.
+// Allowed reports whether a chat may be read at all.
 // Anything not granted is denied, which on an empty allowlist means everything.
 func (c *Config) Allowed(conversationJID string) bool {
 	conv, ok := c.Lookup(conversationJID)
 	return ok && conv.Can(ActionRead)
+}
+
+// Match resolves any of the addresses WhatsApp used for a chat to the one
+// conversation they all mean, satisfying wa.Allower.
+//
+// Returning the canonical JID rather than the matching alias means everything
+// downstream -- the address the forward comes from, the quota ledger, the
+// audit line -- names the conversation the same way, whichever form arrived.
+func (c *Config) Match(candidates []string) (string, bool) {
+	for _, candidate := range candidates {
+		if conv, ok := c.Lookup(candidate); ok && conv.Can(ActionRead) {
+			return conv.JID, true
+		}
+	}
+	return "", false
 }
 
 // AllowedJIDs lists the conversations that may be read, for pruning.

@@ -51,10 +51,16 @@ type Inbound struct {
 	Timestamp    time.Time
 }
 
-// Allower decides whether a chat may be read at all. Returning false means the
-// message is dropped before its content is touched.
+// Allower decides whether a chat may be read at all.
+//
+// It is given every identifier WhatsApp used for the chat, not one, and
+// answers with the canonical conversation it matched. A chat can be addressed
+// by phone-number JID or by LID, and which one arrives is WhatsApp's choice
+// and can change; matching on a single form means a conversation quietly stops
+// matching the day the addressing flips. Silence is the worst failure here,
+// because nothing reports it.
 type Allower interface {
-	Allowed(conversationJID string) bool
+	Match(candidates []string) (conversation string, ok bool)
 }
 
 type Client struct {
@@ -251,11 +257,29 @@ func (c *Client) handleMessage(e *events.Message) {
 	if e.Info.IsGroup || e.Info.IsFromMe {
 		return
 	}
-	chat, err := phone.ParseJID(e.Info.Chat.String())
-	if err != nil {
-		return // groups and unknown servers never reach the allowlist
+	// Every address WhatsApp used for this chat. SenderAlt is the other form
+	// of the sender -- the LID when the message is phone-addressed, the phone
+	// number when it is LID-addressed -- so one of these matches whichever way
+	// the conversation was set up.
+	var candidates []string
+	for _, jid := range []types.JID{e.Info.Chat, e.Info.Sender, e.Info.SenderAlt} {
+		if jid.IsEmpty() {
+			continue
+		}
+		parsed, err := phone.ParseJID(jid.String())
+		if err != nil {
+			continue // groups and unknown servers never reach the allowlist
+		}
+		candidates = append(candidates, parsed.String())
 	}
-	if c.allow == nil || !c.allow.Allowed(chat.String()) {
+	if len(candidates) == 0 {
+		return
+	}
+	if c.allow == nil {
+		return
+	}
+	conversation, ok := c.allow.Match(candidates)
+	if !ok {
 		return
 	}
 	text := extractText(e.Message)
@@ -269,7 +293,7 @@ func (c *Client) handleMessage(e *events.Message) {
 	if c.onMsg != nil {
 		c.onMsg(Inbound{
 			MessageID:    string(e.Info.ID),
-			Conversation: chat.String(),
+			Conversation: conversation,
 			SenderName:   e.Info.PushName,
 			SenderJID:    sender.String(),
 			Text:         text,
@@ -329,6 +353,30 @@ func (c *Client) Resolve(ctx context.Context, number string) (types.JID, error) 
 	default:
 		return types.JID{}, fmt.Errorf("%w: %v", ErrAmbiguous, found)
 	}
+}
+
+// AlternateForm returns the other address of an account: the phone-number JID
+// for a LID, or the LID for a phone number, when the device store knows it.
+//
+// Recording both at sign-up is belt to the braces of matching both at runtime.
+// Empty means unknown, which is not an error -- the mapping is learned from
+// traffic, so a contact never messaged may not have one yet.
+func (c *Client) AlternateForm(ctx context.Context, jid types.JID) types.JID {
+	if c.container == nil || c.container.LIDMap == nil {
+		return types.JID{}
+	}
+	var alt types.JID
+	var err error
+	if jid.Server == types.HiddenUserServer {
+		alt, err = c.container.LIDMap.GetPNForLID(ctx, jid)
+	} else {
+		alt, err = c.container.LIDMap.GetLIDForPN(ctx, jid)
+	}
+	if err != nil {
+		c.log.Debugf("no alternate address for %s: %v", jid, err)
+		return types.JID{}
+	}
+	return alt
 }
 
 func containsJID(list []types.JID, j types.JID) bool {

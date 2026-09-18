@@ -385,6 +385,17 @@ addressed to `5511987654321@…` and to `551187654321@…` reaches the same chat
 the same allowlist entry. Outbound mail always uses the canonical form, so
 threads stay stable in the mailbox.
 
+**FR-11a — Match every address the message carries, not one.** WhatsApp
+addresses a chat by phone-number JID or by LID, and which one arrives is its
+choice, not ours; a conversation set up under one form can start arriving under
+the other. Each message reports both — `Chat`, `Sender` and `SenderAlt` — and
+the allowlist is tested against all of them, answering with the one canonical
+conversation they mean. Matching a single form would mean a conversation
+quietly stopping one day, and silence is the worst failure available here:
+nothing reports a message that was never recognised. Sign-up additionally
+records the alternate form when the device store knows it, which is belt to
+these braces rather than the mechanism.
+
 Resolution runs at sign-up and is cached. It is not re-run per message — a
 contact-existence query per inbound message is both slow and a recognisable
 automation pattern.

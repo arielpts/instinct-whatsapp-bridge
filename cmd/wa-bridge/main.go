@@ -301,8 +301,9 @@ func (h *held) reload() error {
 	return nil
 }
 
-// Allowed satisfies wa.Allower against whatever the current allowlist is.
-func (h *held) Allowed(jid string) bool { return h.get().Allowed(jid) }
+// Match satisfies wa.Allower against whatever the current allowlist is, so a
+// conversation added by control mail is live for the next message.
+func (h *held) Match(candidates []string) (string, bool) { return h.get().Match(candidates) }
 
 // run is the forward path: allow-listed WhatsApp messages become email.
 //
@@ -617,6 +618,9 @@ func handleControl(ctx context.Context, h *held, client *wa.Client, sender mail.
 			label = cmd.Number
 		}
 		aliases := []string{jid.User}
+		if alt := client.AlternateForm(ctx, jid); !alt.IsEmpty() {
+			aliases = append(aliases, alt.User)
+		}
 		if candidates, cerr := phone.Candidates(cmd.Number); cerr == nil {
 			aliases = append(aliases, candidates...)
 		}
@@ -828,6 +832,9 @@ func signup(ctx context.Context, number string) error {
 	// allowlist has to match on both: messages may arrive addressed either way,
 	// and the email address is built from the number, never from this.
 	aliases := []string{jid.User}
+	if alt := client.AlternateForm(ctx, jid); !alt.IsEmpty() {
+		aliases = append(aliases, alt.User)
+	}
 	if candidates, cerr := phone.Candidates(number); cerr == nil {
 		aliases = append(aliases, candidates...)
 	}
