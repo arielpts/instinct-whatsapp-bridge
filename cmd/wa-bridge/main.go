@@ -5,11 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/arielpts/instinct-whatsapp-bridge/internal/mail"
 
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/config"
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/store"
@@ -62,7 +66,7 @@ func main() {
 	case "status":
 		err = status(ctx)
 	case "run":
-		err = errors.New("run needs the mail layer, which is not built yet; pair and status work")
+		err = run(ctx)
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -258,6 +262,99 @@ func watch(ctx context.Context) error {
 			}
 		case <-ctx.Done():
 			fmt.Printf("\n  stopped. %d history syncs discarded.\n\n", client.DroppedHistorySyncs())
+			return nil
+		}
+	}
+}
+
+// run is the forward path: allow-listed WhatsApp messages become email.
+//
+// The reply half is not wired yet, so this is M1 rather than M2: it reads and
+// forwards and sends nothing to WhatsApp, whatever the mode says.
+func run(ctx context.Context) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	st, client, err := open(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	defer client.Disconnect()
+
+	if _, err := client.LinkedJID(); err != nil {
+		return err
+	}
+
+	sender := mail.Config{
+		Host: cfg.SMTPHost, Port: cfg.SMTPPort,
+		User: cfg.SMTPUser, Password: cfg.SMTPPassword,
+		Domain: cfg.MailDomain, Assistant: cfg.AssistantAddress,
+	}
+
+	client.OnMessage(cfg, func(in wa.Inbound) {
+		// Record first. A message recorded but not forwarded can be chased up;
+		// one forwarded but not recorded is forwarded again on the next
+		// delivery (FR-9).
+		if err := st.RecordForward(ctx, in.MessageID, in.Conversation, in.SenderJID, in.Text); err != nil {
+			if !errors.Is(err, store.ErrDuplicate) {
+				log.Printf("recording %s: %v", in.MessageID, err)
+			}
+			return
+		}
+		tok, err := st.IssueToken(ctx, cfg.HMACKey, in.Conversation, in.MessageID)
+		if err != nil {
+			log.Printf("issuing a token for %s: %v", in.MessageID, err)
+			return
+		}
+		number, _ := strings.CutSuffix(in.Conversation, "@s.whatsapp.net")
+		name := in.SenderName
+		if name == "" {
+			name = "+" + number
+		}
+		f := mail.Forward{
+			Number: number, DisplayName: name, Token: tok,
+			MessageID: in.MessageID, HMAC: tok,
+			Timestamp: in.Timestamp, Body: in.Text,
+		}
+		if err := sender.Send(f); err != nil {
+			log.Printf("forwarding %s: %v", in.MessageID, err)
+			return
+		}
+		if err := st.MarkForwarded(ctx, in.MessageID); err != nil {
+			log.Printf("marking %s forwarded: %v", in.MessageID, err)
+		}
+		log.Printf("forwarded %s from %s as [wa:%s]", in.MessageID, name, tok)
+	})
+
+	if err := client.Connect(ctx); err != nil {
+		return fmt.Errorf("connecting: %w", err)
+	}
+
+	allowed := cfg.AllowedJIDs()
+	log.Printf("%s", cfg.Summary())
+	log.Printf("forwarding %d conversation(s) to %s; nothing is sent to WhatsApp",
+		len(allowed), cfg.AssistantAddress)
+
+	prune := time.NewTicker(5 * time.Minute)
+	defer prune.Stop()
+	retention := time.NewTicker(time.Hour)
+	defer retention.Stop()
+
+	for {
+		select {
+		case <-prune.C:
+			if n, err := st.PruneContacts(ctx, allowed); err == nil && n > 0 {
+				log.Printf("pruned %d contact names", n)
+			}
+		case <-retention.C:
+			cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
+			if n, err := st.PurgeBodies(ctx, cutoff); err == nil && n > 0 {
+				log.Printf("purged %d message bodies past retention", n)
+			}
+		case <-ctx.Done():
+			log.Printf("stopped; %d history syncs discarded", client.DroppedHistorySyncs())
 			return nil
 		}
 	}

@@ -114,6 +114,7 @@ type Config struct {
 	IMAPUser         string
 	IMAPPassword     string
 	SMTPHost         string
+	SMTPPort         int
 	SMTPUser         string
 	SMTPPassword     string
 	HMACKey          []byte
@@ -162,6 +163,17 @@ func (c *Config) Lookup(alias string) (Conversation, bool) {
 }
 
 func env(key string) string { return strings.TrimSpace(os.Getenv(key)) }
+
+// envInt falls back rather than failing: a submission port is a detail with a
+// sane default, not a decision worth blocking startup over.
+func envInt(key string, fallback int) int {
+	if v := env(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return fallback
+}
 
 // StateDir is the one setting the operator commands need.
 //
@@ -220,6 +232,7 @@ func Load() (*Config, error) {
 		IMAPUser:         env("WA_BRIDGE_IMAP_USER"),
 		IMAPPassword:     os.Getenv("WA_BRIDGE_IMAP_PASSWORD"),
 		SMTPHost:         env("WA_BRIDGE_SMTP_HOST"),
+		SMTPPort:         envInt("WA_BRIDGE_SMTP_PORT", 465),
 		SMTPUser:         env("WA_BRIDGE_SMTP_USER"),
 		SMTPPassword:     os.Getenv("WA_BRIDGE_SMTP_PASSWORD"),
 		HMACKey:          []byte(os.Getenv("WA_BRIDGE_HMAC_KEY")),
