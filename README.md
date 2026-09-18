@@ -688,27 +688,30 @@ criterion holds.
 - **Exit:** the approach and its risks are written down and accepted.
 
 ### M1 — Read-only forwarding *(the first rollout step)*
-- [ ] whatsmeow: `sqlstore` on the pure-Go SQLite driver, QR pairing rendered as
-      ASCII over SSH
-- [ ] `*events.Message` handling for text; reconnect and keepalive survive a network drop
-- [ ] `*events.HistorySync` discarded unconditionally, with a test (`SEC-9`)
-- [ ] Prune contacts on a schedule inside `run`, not only after pairing.
+- [x] whatsmeow: `sqlstore` on the pure-Go SQLite driver, pairing by typed code
+- [x] `*events.Message` handling for text; reconnect and keepalive survive a network drop
+- [x] `*events.HistorySync` discarded unconditionally, with a test (`SEC-9`)
+- [x] Prune contacts on a schedule inside `run`, not only after pairing.
       Measured on a live account: 3,306 contact rows after one pair. Every
       reconnect re-syncs, so a one-off prune is a one-off reprieve (`SEC-9`)
-- [ ] Read receipts and chat presence verified off (`SEC-10`)
-- [ ] Allowlist filter with an empty default (`SEC-1`)
-- [ ] Sign-up command: candidate generation, `IsOnWhatsApp` resolution, alias
+- [x] Read receipts and chat presence verified off (`SEC-10`)
+- [x] Allowlist filter with an empty default (`SEC-1`)
+- [x] Sign-up command: candidate generation, `IsOnWhatsApp` resolution, alias
       table, loud failure on zero or ambiguous hits (`FR-10`)
-- [ ] `@c.us` / `@s.whatsapp.net` normalization on input (§6.1)
-- [ ] Address ↔ conversation mapping, both `address_style` modes (`FR-3`, `FR-11`)
-- [ ] SQLite schema + WAL; retention purge job (`SEC-7`)
-- [ ] SMTP forward: number-as-sender, display name, subject token, signed
+- [x] `@c.us` / `@s.whatsapp.net` / `@lid` normalization on input (§6.1)
+- [x] Address ↔ conversation mapping (`FR-3`, `FR-11`)
+- [x] SQLite schema + WAL; retention purge job (`SEC-7`)
+- [x] SMTP forward: number-as-sender, display name, subject token, signed
       `Message-ID` (`FR-2`, `FR-13`, `SEC-2`)
-- [ ] Token issue/redeem map with single-use semantics
+- [x] Token issue/redeem map with single-use semantics
+- [x] Retry unforwarded messages. Recording precedes sending, so a failed send
+      stranded the message where nothing would look at it again.
 - [ ] JSONL audit log (`OPS-3`)
-- [ ] systemd unit, `0600` secrets file, service user (`OPS-2`, `SEC-8`)
+- [ ] systemd unit installed and enabled (`OPS-2`, `SEC-8`)
 - **Exit:** one allow-listed conversation forwards correctly for a week; no path
-  in the binary can send anything.
+  in the binary can send anything. *First live forward: 2026-09-18. The
+  binary has no WhatsApp send path at all yet, so the second half holds
+  trivially; the week is running.*
 
 ### M2 — Drafting, still no sending
 - [ ] IMAP poller over the catch-all; routing by recipient address (`FR-4`)
@@ -746,6 +749,12 @@ criterion holds.
 - [ ] `bridge status` subcommand and local health endpoint (`OPS-4`)
 - [ ] Session-loss alerting and degradation behaviour (`OPS-5`)
 - [ ] Encrypted off-box backup of `state.db`, with a tested restore (§8.2)
+- [ ] Deliverability. The first live forwards landed in Gmail's spam folder: a
+      new subdomain with no sending reputation, a numeric local part and no
+      prior correspondence. Confirm SPF, DKIM and DMARC all pass and align,
+      then let reputation build. A forward in a spam folder is a forward the
+      assistant never sees, and nothing in the bridge would report it — the
+      send succeeded.
 - [ ] Resource measurement against the `OPS-1` budget on the target box
 - **Exit:** running unattended for two weeks within budget, zero unapproved sends.
 
