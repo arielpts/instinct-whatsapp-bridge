@@ -2,6 +2,7 @@ package mail
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"time"
 
@@ -16,6 +17,10 @@ type Inbox struct {
 	User     string
 	Password string
 	Mailbox  string // usually INBOX
+
+	// Debug receives the IMAP protocol trace when set. It includes
+	// credentials, so it is opt-in and meant for a person watching a log.
+	Debug io.Writer
 }
 
 func (i Inbox) addr() string {
@@ -32,36 +37,39 @@ type Message struct {
 	Raw []byte
 }
 
-// FetchUnseen returns unread messages and leaves them unread.
+// Poll fetches unseen mail, hands each message to decide, and marks seen only
+// those it returns true for.
 //
-// Marking happens only after the bridge has decided what to do with a message
-// (MarkSeen), so a crash mid-processing means the message is fetched again
-// rather than silently skipped. Deduplication in the store is what stops that
-// becoming a second candidate.
-func (i Inbox) FetchUnseen(limit int) ([]Message, error) {
+// One connection does all of it. Dialling separately to fetch and to mark cost
+// two logins per cycle and left a window where a message was handled but not
+// yet flagged; a single session closes both.
+//
+// Messages are fetched with PEEK so reading marks nothing by itself, and a
+// message decide rejects stays unread, to be tried again rather than lost.
+func (i Inbox) Poll(limit int, decide func(Message) bool) error {
 	c, err := i.dial()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer c.Logout().Wait()
+	defer c.Close()
 
 	mailbox := i.Mailbox
 	if mailbox == "" {
 		mailbox = "INBOX"
 	}
 	if _, err := c.Select(mailbox, nil).Wait(); err != nil {
-		return nil, fmt.Errorf("mail: selecting %s: %w", mailbox, err)
+		return fmt.Errorf("mail: selecting %s: %w", mailbox, err)
 	}
 
 	data, err := c.UIDSearch(&imap.SearchCriteria{
 		NotFlag: []imap.Flag{imap.FlagSeen},
 	}, nil).Wait()
 	if err != nil {
-		return nil, fmt.Errorf("mail: searching: %w", err)
+		return fmt.Errorf("mail: searching: %w", err)
 	}
 	uids := data.AllUIDs()
 	if len(uids) == 0 {
-		return nil, nil
+		return c.Logout().Wait()
 	}
 	if limit > 0 && len(uids) > limit {
 		uids = uids[:limit]
@@ -71,58 +79,39 @@ func (i Inbox) FetchUnseen(limit int) ([]Message, error) {
 	for _, uid := range uids {
 		set.AddNum(uid)
 	}
-	// PEEK, so fetching does not mark anything read behind our back.
 	buffers, err := c.Fetch(set, &imap.FetchOptions{
 		UID:         true,
 		BodySection: []*imap.FetchItemBodySection{{Peek: true}},
 	}).Collect()
 	if err != nil {
-		return nil, fmt.Errorf("mail: fetching: %w", err)
+		return fmt.Errorf("mail: fetching: %w", err)
 	}
 
-	out := make([]Message, 0, len(buffers))
+	var handled imap.UIDSet
 	for _, b := range buffers {
 		for _, section := range b.BodySection {
-			out = append(out, Message{UID: uint32(b.UID), Raw: section.Bytes})
+			if decide(Message{UID: uint32(b.UID), Raw: section.Bytes}) {
+				handled.AddNum(b.UID)
+			}
 			break
 		}
 	}
-	return out, nil
-}
-
-// MarkSeen flags messages as read, which is how the bridge remembers it has
-// dealt with them.
-func (i Inbox) MarkSeen(uids []uint32) error {
-	if len(uids) == 0 {
-		return nil
+	if len(handled) > 0 {
+		cmd := c.Store(handled, &imap.StoreFlags{
+			Op:    imap.StoreFlagsAdd,
+			Flags: []imap.Flag{imap.FlagSeen},
+		}, nil)
+		if err := cmd.Close(); err != nil {
+			return fmt.Errorf("mail: marking seen: %w", err)
+		}
 	}
-	c, err := i.dial()
-	if err != nil {
-		return err
-	}
-	defer c.Logout().Wait()
-
-	mailbox := i.Mailbox
-	if mailbox == "" {
-		mailbox = "INBOX"
-	}
-	if _, err := c.Select(mailbox, nil).Wait(); err != nil {
-		return fmt.Errorf("mail: selecting %s: %w", mailbox, err)
-	}
-	var set imap.UIDSet
-	for _, uid := range uids {
-		set.AddNum(imap.UID(uid))
-	}
-	cmd := c.Store(set, &imap.StoreFlags{
-		Op:    imap.StoreFlagsAdd,
-		Flags: []imap.Flag{imap.FlagSeen},
-	}, nil)
-	return cmd.Close()
+	return c.Logout().Wait()
 }
 
 func (i Inbox) dial() (*imapclient.Client, error) {
 	c, err := imapclient.DialTLS(i.addr(), &imapclient.Options{
-		Dialer: &net.Dialer{Timeout: 20 * time.Second},
+		Dialer:      &net.Dialer{Timeout: 20 * time.Second},
+		DebugWriter: i.Debug,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mail: connecting to %s: %w", i.addr(), err)

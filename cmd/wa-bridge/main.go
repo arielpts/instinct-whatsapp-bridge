@@ -336,6 +336,12 @@ func run(ctx context.Context) error {
 		User: cfg.IMAPUser, Password: cfg.IMAPPassword,
 		Mailbox: "INBOX",
 	}
+	// The trace carries credentials, so it is opt-in and goes to the journal
+	// where the operator already is.
+	if os.Getenv("WA_BRIDGE_IMAP_DEBUG") != "" {
+		inbox.Debug = log.Writer()
+		log.Printf("IMAP protocol tracing is on; it includes the password")
+	}
 	poll := time.NewTicker(30 * time.Second)
 	defer poll.Stop()
 
@@ -440,20 +446,9 @@ func forward(ctx context.Context, st *store.Store, cfg *config.Config, sender ma
 // that stayed unread would be re-examined forever, and SEC-11 wants a count
 // rather than a retry: the reasons are logged, the contents are not.
 func pollOnce(ctx context.Context, st *store.Store, cfg *config.Config, inbox mail.Inbox) error {
-	messages, err := inbox.FetchUnseen(20)
-	if err != nil {
-		return err
-	}
-	var handled []uint32
-	for _, m := range messages {
-		if done := handle(ctx, st, cfg, m); done {
-			handled = append(handled, m.UID)
-		}
-	}
-	if err := inbox.MarkSeen(handled); err != nil {
-		return fmt.Errorf("marking seen: %w", err)
-	}
-	return nil
+	return inbox.Poll(20, func(m mail.Message) bool {
+		return handle(ctx, st, cfg, m)
+	})
 }
 
 // handle reports whether the message reached a terminal outcome. A transient
