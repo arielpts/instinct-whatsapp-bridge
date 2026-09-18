@@ -117,6 +117,7 @@ type Config struct {
 	Mailbox          string
 	AssistantAddress string
 	IMAPHost         string
+	IMAPPort         int
 	IMAPUser         string
 	IMAPPassword     string
 	SMTPHost         string
@@ -246,6 +247,7 @@ func Load() (*Config, error) {
 		Mailbox:          env("WA_BRIDGE_MAILBOX"),
 		AssistantAddress: env("WA_BRIDGE_ASSISTANT_ADDRESS"),
 		IMAPHost:         env("WA_BRIDGE_IMAP_HOST"),
+		IMAPPort:         envInt("WA_BRIDGE_IMAP_PORT", 993),
 		IMAPUser:         env("WA_BRIDGE_IMAP_USER"),
 		IMAPPassword:     os.Getenv("WA_BRIDGE_IMAP_PASSWORD"),
 		SMTPHost:         env("WA_BRIDGE_SMTP_HOST"),

@@ -16,6 +16,7 @@ import (
 
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/mail"
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/phone"
+	"github.com/arielpts/instinct-whatsapp-bridge/internal/reply"
 
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/config"
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/store"
@@ -326,8 +327,17 @@ func run(ctx context.Context) error {
 
 	allowed := cfg.AllowedJIDs()
 	log.Printf("%s", cfg.Summary())
-	log.Printf("forwarding %d conversation(s) to %s; nothing is sent to WhatsApp",
-		len(allowed), cfg.AssistantAddress)
+	log.Printf("forwarding %d conversation(s) to %s; polling %s for replies",
+		len(allowed), cfg.AssistantAddress, cfg.IMAPHost)
+	log.Printf("nothing is sent to WhatsApp: no send path is built yet")
+
+	inbox := mail.Inbox{
+		Host: cfg.IMAPHost, Port: cfg.IMAPPort,
+		User: cfg.IMAPUser, Password: cfg.IMAPPassword,
+		Mailbox: "INBOX",
+	}
+	poll := time.NewTicker(30 * time.Second)
+	defer poll.Stop()
 
 	// A failed send leaves the message recorded but unforwarded. Retry it, or
 	// a transient SMTP failure is a silent deletion: WhatsApp will not send it
@@ -342,6 +352,11 @@ func run(ctx context.Context) error {
 
 	for {
 		select {
+		case <-poll.C:
+			if err := pollOnce(ctx, st, cfg, inbox); err != nil {
+				log.Printf("polling: %v", err)
+			}
+
 		case <-retry.C:
 			pending, err := st.Pending(ctx, time.Now().Add(-30*time.Second), 20)
 			if err != nil {
@@ -417,6 +432,66 @@ func forward(ctx context.Context, st *store.Store, cfg *config.Config, sender ma
 		log.Printf("marking %s forwarded: %v", in.MessageID, err)
 	}
 	log.Printf("forwarded %s from %s as [wa:%s]", in.MessageID, name, tok)
+}
+
+// pollOnce reads the mailbox and turns accepted replies into candidates.
+//
+// Rejections are marked seen as well as accepted messages. A rejected reply
+// that stayed unread would be re-examined forever, and SEC-11 wants a count
+// rather than a retry: the reasons are logged, the contents are not.
+func pollOnce(ctx context.Context, st *store.Store, cfg *config.Config, inbox mail.Inbox) error {
+	messages, err := inbox.FetchUnseen(20)
+	if err != nil {
+		return err
+	}
+	var handled []uint32
+	for _, m := range messages {
+		if done := handle(ctx, st, cfg, m); done {
+			handled = append(handled, m.UID)
+		}
+	}
+	if err := inbox.MarkSeen(handled); err != nil {
+		return fmt.Errorf("marking seen: %w", err)
+	}
+	return nil
+}
+
+// handle reports whether the message reached a terminal outcome. A transient
+// failure returns false, leaving it unread to be tried again.
+func handle(ctx context.Context, st *store.Store, cfg *config.Config, m mail.Message) bool {
+	r, err := mail.Parse(m.Raw)
+	if err != nil {
+		log.Printf("mail %d: unreadable: %v", m.UID, err)
+		return true
+	}
+	v, err := reply.Verify(cfg, r)
+	if err != nil {
+		// The reason, never the words. A rejected message is one we have no
+		// business quoting into a log.
+		log.Printf("mail %d from %s: rejected: %v", m.UID, r.From, err)
+		return true
+	}
+	binding, err := st.RedeemToken(ctx, cfg.HMACKey, v.Token)
+	if err != nil {
+		log.Printf("mail %d: token [wa:%s]: %v", m.UID, v.Token, err)
+		return true
+	}
+	// SEC-13 completed: the token and the address must name one conversation.
+	if err := v.Agree(binding, cfg); err != nil {
+		log.Printf("mail %d: %v", m.UID, err)
+		return true
+	}
+	id, err := st.CreateCandidate(ctx, r.MessageID, v.Token, v.Conversation.JID, v.Bubbles)
+	if errors.Is(err, store.ErrDuplicate) {
+		return true
+	}
+	if err != nil {
+		log.Printf("mail %d: queueing: %v", m.UID, err)
+		return false // transient; try again rather than lose the reply
+	}
+	log.Printf("candidate %d for %s: %d bubble(s), awaiting approval [mode %s]",
+		id, v.Conversation.Label, len(v.Bubbles), cfg.Mode)
+	return true
 }
 
 // resend retries a message that was recorded but never forwarded. The token is
