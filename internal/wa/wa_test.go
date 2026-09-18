@@ -32,3 +32,13 @@ func TestExtractText(t *testing.T) {
 		})
 	}
 }
+
+// WhatsApp rejects a pairing request whose display name is not a common
+// browser, with a 400 that says nothing about why. Keep the shape honest.
+func TestPairDisplayNameLooksLikeABrowser(t *testing.T) {
+	want := "Chrome (Linux)"
+	if pairDisplayName != want {
+		t.Errorf("pairDisplayName = %q; WhatsApp validates this against common "+
+			"browsers and 400s otherwise, so it cannot be the product name", pairDisplayName)
+	}
+}

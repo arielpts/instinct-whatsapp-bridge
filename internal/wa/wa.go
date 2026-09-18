@@ -29,6 +29,11 @@ import (
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/phone"
 )
 
+// pairDisplayName must read as "Browser (OS)". WhatsApp validates it against a
+// list of common browsers and rejects the pairing request with a bare 400 if it
+// does not match -- so this is not a place to put the product name.
+const pairDisplayName = "Chrome (Linux)"
+
 var (
 	ErrNotLinked  = errors.New("wa: no linked device; run `wa-bridge pair`")
 	ErrNotOnWhats = errors.New("wa: no WhatsApp account for any candidate")
@@ -133,14 +138,14 @@ func (c *Client) PairCode(ctx context.Context, number string) (string, error) {
 	if c.wm.Store.ID != nil {
 		return "", errors.New("wa: already linked; delete the device store to re-pair")
 	}
-	candidates, err := phone.Candidates(number)
-	if err != nil {
-		return "", err
+	if phone.Digits(number) == "" {
+		return "", fmt.Errorf("wa: %q has no digits", number)
 	}
-	// Pairing addresses the phone we are linking, so the number is the one the
-	// operator gives; the candidate list only normalises its punctuation.
-	return c.wm.PairPhone(ctx, "+"+candidates[0], true,
-		whatsmeow.PairClientChrome, "wa-bridge (Linux)")
+	// The number goes through untouched. whatsmeow strips punctuation itself,
+	// and the ninth-digit candidates are for finding *other* people's accounts
+	// -- the operator knows which number is their own, and reshaping it here
+	// would pair the wrong one.
+	return c.wm.PairPhone(ctx, number, true, whatsmeow.PairClientChrome, pairDisplayName)
 }
 
 func (c *Client) handle(evt any) {
