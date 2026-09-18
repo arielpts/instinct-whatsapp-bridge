@@ -68,8 +68,13 @@ type Client struct {
 	loginOnce sync.Once
 }
 
-// LoggedIn closes once the device is linked, so pairing can wait for the
-// account to confirm rather than guessing that typing the code worked.
+// LoggedIn closes once the device is linked *and* the session that follows has
+// come up.
+//
+// PairSuccess is not that moment. whatsmeow tears the socket down and logs in
+// again afterwards, and the phone waits for that second connection before it
+// considers the device attached -- disconnect on PairSuccess and the phone
+// reports "could not link device" for a pairing the server already accepted.
 func (c *Client) LoggedIn() <-chan struct{} { return c.loggedIn }
 
 func (c *Client) markLoggedIn() { c.loginOnce.Do(func() { close(c.loggedIn) }) }
@@ -206,7 +211,8 @@ func (c *Client) handle(evt any) {
 		c.handleMessage(e)
 
 	case *events.PairSuccess:
-		c.markLoggedIn()
+		// Accepted, but not finished: the login below is what the phone waits for.
+		c.log.Infof("paired with %s; waiting for the session to come up", e.ID)
 
 	case *events.Connected:
 		if c.wm.Store.ID != nil {

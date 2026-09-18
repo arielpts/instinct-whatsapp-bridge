@@ -114,7 +114,16 @@ func pair(ctx context.Context, number string) error {
 	select {
 	case <-client.LoggedIn():
 		jid, _ := client.LinkedJID()
-		fmt.Printf("  Linked: %s\n\n", jid)
+		fmt.Printf("  Linked: %s\n", jid)
+		// Hold the connection open briefly. The phone finishes attaching the
+		// device on this session; dropping it the instant we are told we are
+		// linked is what makes the phone say it failed.
+		fmt.Printf("  Letting the session settle...\n")
+		select {
+		case <-time.After(15 * time.Second):
+		case <-ctx.Done():
+		}
+		fmt.Printf("  Done. Check Linked Devices on the phone.\n\n")
 		return nil
 	case <-time.After(3 * time.Minute):
 		return errors.New("the code expired before the phone confirmed; run pair again")
