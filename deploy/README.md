@@ -59,11 +59,14 @@ rule beyond SSH is needed.
 
 ## Install
 
-Cross-compile from anywhere, ship one file:
+Cross-compile from anywhere, ship one file. Check the box's architecture
+first rather than assuming which plan was created:
 
 ```sh
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o wa-bridge ./cmd/wa-bridge
-scp wa-bridge root@<ip>:/usr/local/bin/wa-bridge
+ssh root@<ip> uname -m      # aarch64 -> arm64, x86_64 -> amd64
+
+make arm64                  # or: make amd64
+scp wa-bridge.arm64 root@<ip>:/usr/local/bin/wa-bridge
 
 install -d -m 0750 -o root -g wa-bridge /etc/wa-bridge
 install -m 0640 -o root -g wa-bridge deploy/env.example /etc/wa-bridge/env
