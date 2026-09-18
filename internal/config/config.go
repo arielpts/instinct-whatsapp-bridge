@@ -136,6 +136,22 @@ func (c *Config) AcceptsInboundMail() bool {
 	return len(c.Instinct.FromAddresses) > 0 && len(c.Instinct.DKIMDomains) > 0
 }
 
+// Allowed reports whether a chat may be read at all, satisfying wa.Allower.
+// Anything not granted is denied, which on an empty allowlist means everything.
+func (c *Config) Allowed(conversationJID string) bool {
+	conv, ok := c.Lookup(conversationJID)
+	return ok && conv.Can(ActionRead)
+}
+
+// AllowedJIDs lists the conversations that may be read, for pruning.
+func (c *Config) AllowedJIDs() []string {
+	out := make([]string, 0, len(c.Conversations))
+	for _, conv := range c.Conversations {
+		out = append(out, conv.JID)
+	}
+	return out
+}
+
 // Lookup resolves any alias of a conversation to its entry (FR-11).
 func (c *Config) Lookup(alias string) (Conversation, bool) {
 	i, ok := c.byAlias[phone.Digits(alias)]
@@ -160,6 +176,39 @@ func StateDir() (string, error) {
 	return dir, nil
 }
 
+// LoadPolicy reads the policy file and the state directory, without requiring
+// the mail settings.
+//
+// Reading WhatsApp and sending email are separable, and the mail half is the
+// part still waiting on DNS. A command that only reads should not be blocked by
+// an IMAP host it will never dial.
+func LoadPolicy() (*Config, error) {
+	c := &Config{
+		MailDomain: env("WA_BRIDGE_MAIL_DOMAIN"),
+		StateDir:   env("WA_BRIDGE_STATE_DIR"),
+	}
+	if c.StateDir == "" {
+		return nil, errors.New("config: WA_BRIDGE_STATE_DIR is unset")
+	}
+	f, err := readFile()
+	if err != nil {
+		return nil, err
+	}
+	return buildPolicy(c, f, env("WA_BRIDGE_MODE"))
+}
+
+func readFile() (File, error) {
+	path := env("WA_BRIDGE_CONFIG")
+	if path == "" {
+		return File{}, errors.New("config: WA_BRIDGE_CONFIG is unset")
+	}
+	var f File
+	if _, err := toml.DecodeFile(path, &f); err != nil {
+		return File{}, fmt.Errorf("config: reading %s: %w", path, err)
+	}
+	return f, nil
+}
+
 // Load reads the environment, then the policy file it points at, and returns a
 // validated configuration or an explanation of why the bridge will not start.
 func Load() (*Config, error) {
@@ -177,13 +226,9 @@ func Load() (*Config, error) {
 		StateDir:         env("WA_BRIDGE_STATE_DIR"),
 	}
 
-	path := env("WA_BRIDGE_CONFIG")
-	if path == "" {
-		return nil, errors.New("config: WA_BRIDGE_CONFIG is unset")
-	}
-	var f File
-	if _, err := toml.DecodeFile(path, &f); err != nil {
-		return nil, fmt.Errorf("config: reading %s: %w", path, err)
+	f, err := readFile()
+	if err != nil {
+		return nil, err
 	}
 	return build(c, f, env("WA_BRIDGE_MODE"))
 }
@@ -230,6 +275,21 @@ func build(c *Config, f File, modeOverride string) (*Config, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// buildPolicy is build without the mail half.
+func buildPolicy(c *Config, f File, modeOverride string) (*Config, error) {
+	full, err := build(&Config{
+		MailDomain: "policy.invalid", Mailbox: "x@policy.invalid",
+		AssistantAddress: "x@policy.invalid", IMAPHost: "x", SMTPHost: "x",
+		HMACKey: make([]byte, minKeyLen), StateDir: c.StateDir,
+	}, f, modeOverride)
+	if err != nil {
+		return nil, err
+	}
+	full.MailDomain, full.Mailbox, full.AssistantAddress = c.MailDomain, "", ""
+	full.IMAPHost, full.SMTPHost, full.HMACKey = "", "", nil
+	return full, nil
 }
 
 func withDefaults(l Limits) Limits {

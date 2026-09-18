@@ -26,6 +26,7 @@ const usage = `wa-bridge -- Instinct WhatsApp bridge
   pair <number>     link this box to a WhatsApp account by typed code
   unpair            forget the local device so pairing can start over
   prune             delete stored contacts for anyone not allow-listed
+  watch             print allow-listed messages as they arrive, sending nothing
   signup <number>   resolve a phone number to the JID WhatsApp really uses
   status            report what is linked, configured and queued
   run               forward allow-listed messages and process replies
@@ -51,6 +52,8 @@ func main() {
 		err = unpair(ctx)
 	case "prune":
 		err = prune(ctx)
+	case "watch":
+		err = watch(ctx)
 	case "version", "--version", "-v":
 		fmt.Println(version)
 		return
@@ -192,6 +195,72 @@ func prune(ctx context.Context) error {
 	fmt.Printf("\n  contacts   %d stored, %d removed, %d kept (%d allow-listed)\n\n",
 		before, n, after, len(keep))
 	return nil
+}
+
+// watch is the read path with the mail replaced by the terminal.
+//
+// Everything M1 asks for happens here except the SMTP call: the allowlist, the
+// history-sync drop, deduplication, extraction. Running it against a real
+// account is how those stop being claims. It sends nothing and cannot: no
+// WhatsApp send path is reachable from this command.
+func watch(ctx context.Context) error {
+	cfg, err := config.LoadPolicy()
+	if err != nil {
+		return err
+	}
+	st, client, err := open(ctx)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	defer client.Disconnect()
+
+	if _, err := client.LinkedJID(); err != nil {
+		return err
+	}
+
+	client.OnMessage(cfg, func(in wa.Inbound) {
+		// The same deduplication the forwarder will use, so a redelivered
+		// message is visibly recognised rather than printed twice.
+		if err := st.RecordForward(ctx, in.MessageID, in.Conversation, in.SenderJID, in.Text); err != nil {
+			fmt.Printf("  [dup] %s  %s\n", in.Timestamp.Format("15:04:05"), in.MessageID)
+			return
+		}
+		label := in.SenderName
+		if label == "" {
+			label = in.SenderJID
+		}
+		fmt.Printf("\n  %s  %s\n  %s\n", in.Timestamp.Format("15:04:05"), label, in.Text)
+	})
+
+	if err := client.Connect(ctx); err != nil {
+		return fmt.Errorf("connecting: %w", err)
+	}
+
+	allowed := cfg.AllowedJIDs()
+	fmt.Printf("\n  watching %d conversation(s); mode %s; nothing will be sent\n",
+		len(allowed), cfg.Mode)
+	if len(allowed) == 0 {
+		fmt.Printf("  the allowlist is empty, so every message will be dropped.\n" +
+			"  add one with `wa-bridge signup <number>` first.\n")
+	}
+	fmt.Printf("  ctrl-c to stop\n")
+
+	// Every reconnect re-syncs contacts, so pruning is periodic or it is
+	// decorative (SEC-9).
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if n, err := st.PruneContacts(ctx, allowed); err == nil && n > 0 {
+				fmt.Printf("  [pruned %d contact names]\n", n)
+			}
+		case <-ctx.Done():
+			fmt.Printf("\n  stopped. %d history syncs discarded.\n\n", client.DroppedHistorySyncs())
+			return nil
+		}
+	}
 }
 
 func unpair(ctx context.Context) error {
