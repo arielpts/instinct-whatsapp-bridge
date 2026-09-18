@@ -191,6 +191,43 @@ func (s *Store) RecordForward(ctx context.Context, messageID, conversation, send
 	return nil
 }
 
+// Pending lists messages recorded but never forwarded.
+//
+// Recording precedes sending, so a failed send leaves a row behind. Without
+// this the message is simply lost: WhatsApp considers it delivered, and
+// deduplication stops it ever being handled again. A transient SMTP failure
+// must not be a silent deletion.
+type Pending struct {
+	MessageID    string
+	Conversation string
+	Sender       string
+	Body         string
+	Received     time.Time
+}
+
+func (s *Store) Pending(ctx context.Context, olderThan time.Time, limit int) ([]Pending, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT message_id, conversation, sender, body, received_unix
+		   FROM forwards
+		  WHERE forwarded_unix IS NULL AND body IS NOT NULL AND received_unix < ?
+		  ORDER BY received_unix LIMIT ?`, olderThan.Unix(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Pending
+	for rows.Next() {
+		var p Pending
+		var received int64
+		if err := rows.Scan(&p.MessageID, &p.Conversation, &p.Sender, &p.Body, &received); err != nil {
+			return nil, err
+		}
+		p.Received = time.Unix(received, 0)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // MarkForwarded records that the email went out.
 func (s *Store) MarkForwarded(ctx context.Context, messageID string) error {
 	_, err := s.db.ExecContext(ctx,

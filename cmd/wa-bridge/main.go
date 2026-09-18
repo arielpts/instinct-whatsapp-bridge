@@ -329,6 +329,12 @@ func run(ctx context.Context) error {
 	log.Printf("forwarding %d conversation(s) to %s; nothing is sent to WhatsApp",
 		len(allowed), cfg.AssistantAddress)
 
+	// A failed send leaves the message recorded but unforwarded. Retry it, or
+	// a transient SMTP failure is a silent deletion: WhatsApp will not send it
+	// again, and deduplication would refuse it if it did.
+	retry := time.NewTicker(time.Minute)
+	defer retry.Stop()
+
 	prune := time.NewTicker(5 * time.Minute)
 	defer prune.Stop()
 	retention := time.NewTicker(time.Hour)
@@ -336,6 +342,16 @@ func run(ctx context.Context) error {
 
 	for {
 		select {
+		case <-retry.C:
+			pending, err := st.Pending(ctx, time.Now().Add(-30*time.Second), 20)
+			if err != nil {
+				log.Printf("looking for unforwarded messages: %v", err)
+				break
+			}
+			for _, p := range pending {
+				resend(ctx, st, cfg, sender, p)
+			}
+
 		case <-prune.C:
 			if n, err := st.PruneContacts(ctx, allowed); err == nil && n > 0 {
 				log.Printf("pruned %d contact names", n)
@@ -401,6 +417,37 @@ func forward(ctx context.Context, st *store.Store, cfg *config.Config, sender ma
 		log.Printf("marking %s forwarded: %v", in.MessageID, err)
 	}
 	log.Printf("forwarded %s from %s as [wa:%s]", in.MessageID, name, tok)
+}
+
+// resend retries a message that was recorded but never forwarded. The token is
+// derived from the binding, so re-issuing yields the one already promised.
+func resend(ctx context.Context, st *store.Store, cfg *config.Config, sender mail.Config, p store.Pending) {
+	tok, err := st.IssueToken(ctx, cfg.HMACKey, p.Conversation, p.MessageID)
+	if err != nil {
+		log.Printf("retry %s: issuing a token: %v", p.MessageID, err)
+		return
+	}
+	conv, ok := cfg.Lookup(p.Conversation)
+	if !ok {
+		return // no longer allow-listed; leave it unforwarded
+	}
+	number := phone.Digits(conv.Number)
+	name := conv.Label
+	if name == "" {
+		name = "+" + number
+	}
+	if err := sender.Send(mail.Forward{
+		Number: number, DisplayName: name, Token: tok,
+		MessageID: p.MessageID, HMAC: tok,
+		Timestamp: p.Received, Body: p.Body,
+	}); err != nil {
+		log.Printf("retry %s: %v", p.MessageID, err)
+		return
+	}
+	if err := st.MarkForwarded(ctx, p.MessageID); err != nil {
+		log.Printf("retry %s: marking forwarded: %v", p.MessageID, err)
+	}
+	log.Printf("forwarded %s (retry) from %s as [wa:%s]", p.MessageID, name, tok)
 }
 
 func unpair(ctx context.Context) error {
