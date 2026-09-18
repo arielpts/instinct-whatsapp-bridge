@@ -79,6 +79,17 @@ else
 	echo "/etc/wa-bridge/env exists; left alone"
 fi
 
+say "Policy file"
+if [ ! -f /etc/wa-bridge/config.toml ]; then
+	curl -fsSL -o /etc/wa-bridge/config.toml \
+		https://raw.githubusercontent.com/arielpts/instinct-whatsapp-bridge/main/deploy/config.example.toml
+	chown root:wa-bridge /etc/wa-bridge/config.toml
+	chmod 0640 /etc/wa-bridge/config.toml
+	echo "created /etc/wa-bridge/config.toml with an empty conversation list"
+else
+	echo "/etc/wa-bridge/config.toml exists; left alone"
+fi
+
 say "Done"
 cat <<SUMMARY
 

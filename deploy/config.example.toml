@@ -1,0 +1,39 @@
+# /etc/wa-bridge/config.toml -- the policy half.
+#
+# The environment says which domain we are and holds the secrets; this file
+# says who may be messaged and under what limits. It is meant to be read and
+# diffed, so nothing secret belongs here.
+
+mode           = "draft-only"   # draft-only | approve-each | approve-except
+address_style  = "number"       # number | opaque
+retention_days = 7
+
+# SEC-14: the accepted sender. Empty means accept nothing, which is the right
+# default -- fill it in from a real message from Instinct, not from a guess.
+[instinct]
+from_addresses   = []
+dkim_domains     = []
+envelope_domains = []
+ip_ranges        = []
+authserv_id      = ""
+
+[limits]
+per_conversation_per_hour = 5    # counted in bubbles, not candidates
+per_day_total             = 30
+inbound_mail_per_hour     = 60
+bubbles_per_candidate     = 5
+chars_per_bubble          = 4096
+bubble_pause_ms           = 1200
+
+# No conversations yet, so nothing is forwarded and nothing can be sent.
+#
+# Add one only after `wa-bridge signup <number>` has told you the JID WhatsApp
+# actually has; a hand-written JID is a guess, and guesses here reach the wrong
+# person.
+#
+# [[conversation]]
+# number  = "+55 11 98765-4321"
+# jid     = "5511987654321@s.whatsapp.net"
+# aliases = ["5511987654321", "551187654321"]
+# label   = "..."
+# actions = ["read", "draft"]
