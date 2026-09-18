@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -55,6 +56,9 @@ type Conversation struct {
 	Aliases []string `toml:"aliases"`
 	Label   string   `toml:"label"`
 	Actions []string `toml:"actions"`
+
+	// Managed marks a conversation added by control mail rather than by hand.
+	Managed bool `toml:"-"`
 }
 
 func (c Conversation) Can(action string) bool {
@@ -110,6 +114,20 @@ type File struct {
 	Limits        Limits         `toml:"limits"`
 	Conversations []Conversation `toml:"conversation"`
 }
+
+// ManagedFile is where conversations added by control mail are written.
+//
+// The policy file is hand-edited and full of comments and intent; a program
+// that rewrites it destroys both. The managed file is the bridge's own, and
+// its entries are constrained (SEC-1a) regardless of what they contain.
+const ManagedFile = "allowlist.toml"
+
+// ManagedActions are the only grants a control message can confer.
+//
+// Adding a conversation decides what the assistant may read. Granting send
+// decides who it may message, which is a different question with a different
+// blast radius, and it stays a hand edit.
+var ManagedActions = []string{ActionRead, ActionDraft}
 
 // Config is the validated result. Mode is already the tightened one.
 type Config struct {
@@ -262,7 +280,112 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	managed, err := readManaged(c.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	f.Conversations = append(f.Conversations, managed...)
 	return build(c, f, env("WA_BRIDGE_MODE"))
+}
+
+// readManaged loads the bridge's own allowlist additions, clamping their
+// grants. A hand-edited send in this file does not take effect; the constraint
+// lives in the loader, not in the writer, so editing the file cannot lift it.
+func readManaged(stateDir string) ([]Conversation, error) {
+	if stateDir == "" {
+		return nil, nil
+	}
+	path := filepath.Join(stateDir, ManagedFile)
+	var f File
+	if _, err := toml.DecodeFile(path, &f); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("config: reading %s: %w", path, err)
+	}
+	for i := range f.Conversations {
+		f.Conversations[i].Actions = ManagedActions
+		f.Conversations[i].Managed = true
+	}
+	return f.Conversations, nil
+}
+
+// AppendManaged adds a conversation to the managed allowlist.
+func AppendManaged(stateDir string, c Conversation) error {
+	path := filepath.Join(stateDir, ManagedFile)
+	var f File
+	if _, err := toml.DecodeFile(path, &f); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("config: reading %s: %w", path, err)
+	}
+	for _, existing := range f.Conversations {
+		if strings.EqualFold(existing.JID, c.JID) {
+			return fmt.Errorf("config: %s is already allow-listed as %q", c.Number, existing.Label)
+		}
+	}
+	c.Actions = ManagedActions
+	f.Conversations = append(f.Conversations, c)
+
+	var b strings.Builder
+	b.WriteString("# Written by wa-bridge from control mail. Hand edits to actions\n")
+	b.WriteString("# have no effect: the loader clamps them to read and draft.\n")
+	for _, conv := range f.Conversations {
+		b.WriteString("\n[[conversation]]\n")
+		fmt.Fprintf(&b, "number  = %q\n", conv.Number)
+		fmt.Fprintf(&b, "jid     = %q\n", conv.JID)
+		fmt.Fprintf(&b, "aliases = [")
+		for i, a := range conv.Aliases {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "%q", a)
+		}
+		b.WriteString("]\n")
+		fmt.Fprintf(&b, "label   = %q\n", conv.Label)
+		fmt.Fprintf(&b, "actions = [\"read\", \"draft\"]\n")
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o640); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path) // atomic: a torn allowlist is a broken bridge
+}
+
+// RemoveManaged drops a conversation from the managed allowlist.
+func RemoveManaged(stateDir, jid string) error {
+	path := filepath.Join(stateDir, ManagedFile)
+	var f File
+	if _, err := toml.DecodeFile(path, &f); err != nil {
+		return fmt.Errorf("config: reading %s: %w", path, err)
+	}
+	kept := f.Conversations[:0]
+	found := false
+	for _, conv := range f.Conversations {
+		if strings.EqualFold(conv.JID, jid) {
+			found = true
+			continue
+		}
+		kept = append(kept, conv)
+	}
+	if !found {
+		return fmt.Errorf("config: %s is not in the managed allowlist", jid)
+	}
+	var b strings.Builder
+	b.WriteString("# Written by wa-bridge from control mail.\n")
+	for _, conv := range kept {
+		fmt.Fprintf(&b, "\n[[conversation]]\nnumber  = %q\njid     = %q\naliases = [", conv.Number, conv.JID)
+		for i, a := range conv.Aliases {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "%q", a)
+		}
+		fmt.Fprintf(&b, "]\nlabel   = %q\nactions = [\"read\", \"draft\"]\n", conv.Label)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o640); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func build(c *Config, f File, modeOverride string) (*Config, error) {

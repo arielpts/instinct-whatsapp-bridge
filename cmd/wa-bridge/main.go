@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/arielpts/instinct-whatsapp-bridge/internal/control"
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/mail"
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/phone"
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/reply"
@@ -272,6 +274,36 @@ func watch(ctx context.Context) error {
 	}
 }
 
+// held is the running configuration, swappable without a restart.
+//
+// Control mail can add conversations, so the allowlist changes while the
+// bridge is running. Reloading through one guarded pointer keeps every reader
+// on a consistent view rather than a half-updated one.
+type held struct {
+	mu sync.RWMutex
+	c  *config.Config
+}
+
+func (h *held) get() *config.Config {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.c
+}
+
+func (h *held) reload() error {
+	fresh, err := config.Load()
+	if err != nil {
+		return err
+	}
+	h.mu.Lock()
+	h.c = fresh
+	h.mu.Unlock()
+	return nil
+}
+
+// Allowed satisfies wa.Allower against whatever the current allowlist is.
+func (h *held) Allowed(jid string) bool { return h.get().Allowed(jid) }
+
 // run is the forward path: allow-listed WhatsApp messages become email.
 //
 // The reply half is not wired yet, so this is M1 rather than M2: it reads and
@@ -281,6 +313,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	h := &held{c: cfg}
 	st, client, err := open(ctx)
 	if err != nil {
 		return err
@@ -309,11 +342,11 @@ func run(ctx context.Context) error {
 	go func() {
 		defer close(done)
 		for in := range queue {
-			forward(ctx, st, cfg, sender, in)
+			forward(ctx, st, h.get(), sender, in)
 		}
 	}()
 
-	client.OnMessage(cfg, func(in wa.Inbound) {
+	client.OnMessage(h, func(in wa.Inbound) {
 		select {
 		case queue <- in:
 		default:
@@ -368,7 +401,7 @@ func run(ctx context.Context) error {
 	for {
 		select {
 		case <-poll.C:
-			if err := pollOnce(ctx, st, cfg, client, inbox); err != nil {
+			if err := pollOnce(ctx, st, h, client, sender, inbox); err != nil {
 				log.Printf("polling: %v", err)
 			}
 
@@ -379,15 +412,15 @@ func run(ctx context.Context) error {
 				break
 			}
 			for _, p := range pending {
-				resend(ctx, st, cfg, sender, p)
+				resend(ctx, st, h.get(), sender, p)
 			}
 
 		case <-prune.C:
-			if n, err := st.PruneContacts(ctx, allowed); err == nil && n > 0 {
+			if n, err := st.PruneContacts(ctx, h.get().AllowedJIDs()); err == nil && n > 0 {
 				log.Printf("pruned %d contact names", n)
 			}
 		case <-retention.C:
-			cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
+			cutoff := time.Now().AddDate(0, 0, -h.get().RetentionDays)
 			if n, err := st.PurgeBodies(ctx, cutoff); err == nil && n > 0 {
 				log.Printf("purged %d message bodies past retention", n)
 			}
@@ -454,19 +487,25 @@ func forward(ctx context.Context, st *store.Store, cfg *config.Config, sender ma
 // Rejections are marked seen as well as accepted messages. A rejected reply
 // that stayed unread would be re-examined forever, and SEC-11 wants a count
 // rather than a retry: the reasons are logged, the contents are not.
-func pollOnce(ctx context.Context, st *store.Store, cfg *config.Config, client *wa.Client, inbox mail.Inbox) error {
+func pollOnce(ctx context.Context, st *store.Store, h *held, client *wa.Client, sender mail.Config, inbox mail.Inbox) error {
 	return inbox.Poll(20, func(m mail.Message) bool {
-		return handle(ctx, st, cfg, client, m)
+		return handle(ctx, st, h, client, sender, m)
 	})
 }
 
 // handle reports whether the message reached a terminal outcome. A transient
 // failure returns false, leaving it unread to be tried again.
-func handle(ctx context.Context, st *store.Store, cfg *config.Config, client *wa.Client, m mail.Message) bool {
+func handle(ctx context.Context, st *store.Store, h *held, client *wa.Client, sender mail.Config, m mail.Message) bool {
+	cfg := h.get()
 	r, err := mail.Parse(m.Raw)
 	if err != nil {
 		log.Printf("mail %d: unreadable: %v", m.UID, err)
 		return true
+	}
+	// The address decides what this message is. Commands arrive here and
+	// nowhere else; conversation mail can never be read as an instruction.
+	if control.IsControlAddress(r.EnvelopeTo, cfg.MailDomain) {
+		return handleControl(ctx, h, client, sender, r, m.UID)
 	}
 	v, err := reply.Verify(cfg, r)
 	if err != nil {
@@ -505,6 +544,135 @@ func handle(ctx context.Context, st *store.Store, cfg *config.Config, client *wa
 			id, cfg.Mode, v.Conversation.Can(config.ActionSend))
 	}
 	return true
+}
+
+// maxManaged caps how many conversations control mail may add.
+//
+// The cap is the difference between delegating the allowlist and delegating
+// the account. A runaway, a loop, or a misunderstanding stops here instead of
+// mirroring every chat the owner has.
+const maxManaged = 50
+
+// handleControl executes a command sent to the control address.
+//
+// Identity is checked exactly as for a reply: the same From allowlist, the
+// same signature verified against DNS. A command is more dangerous than a
+// message, so it gets no weaker a gate.
+func handleControl(ctx context.Context, h *held, client *wa.Client, sender mail.Config, r *mail.Received, uid uint32) bool {
+	cfg := h.get()
+
+	if !cfg.AcceptsInboundMail() ||
+		!containsFold(cfg.Instinct.FromAddresses, r.From) ||
+		!r.SignedBy(cfg.Instinct.DKIMDomains) {
+		log.Printf("control %d from %s: rejected: not an allow-listed, signed sender", uid, r.From)
+		return true
+	}
+
+	cmd, err := control.Parse(r.Text)
+	if err != nil {
+		log.Printf("control %d: %v", uid, err)
+		notify(sender, "control: not understood", fmt.Sprintf("%v\n\nCommands: allowlist <number> [label] | remove <number> | list", err))
+		return true
+	}
+
+	switch cmd.Verb {
+	case control.List:
+		var b strings.Builder
+		for _, c := range cfg.Conversations {
+			origin := "config"
+			if c.Managed {
+				origin = "added by control"
+			}
+			fmt.Fprintf(&b, "%-20s %-24s %v  (%s)\n", c.Number, c.Label, c.Actions, origin)
+		}
+		if b.Len() == 0 {
+			b.WriteString("nothing is allow-listed\n")
+		}
+		notify(sender, "control: allowlist", b.String())
+		log.Printf("control %d: listed %d conversation(s)", uid, len(cfg.Conversations))
+
+	case control.Allowlist:
+		managed := 0
+		for _, c := range cfg.Conversations {
+			if c.Managed {
+				managed++
+			}
+		}
+		if managed >= maxManaged {
+			log.Printf("control %d: refused: %d managed conversations is the cap", uid, managed)
+			notify(sender, "control: refused", fmt.Sprintf("%d conversations already added by control; the cap is %d.", managed, maxManaged))
+			return true
+		}
+
+		// Ask WhatsApp which account the number is, rather than trusting the
+		// digits in the message (FR-10).
+		jid, err := client.Resolve(ctx, cmd.Number)
+		if err != nil {
+			log.Printf("control %d: resolving %s: %v", uid, cmd.Number, err)
+			notify(sender, "control: not added", fmt.Sprintf("%s: %v", cmd.Number, err))
+			return true
+		}
+		label := cmd.Label
+		if label == "" {
+			label = cmd.Number
+		}
+		aliases := []string{jid.User}
+		if candidates, cerr := phone.Candidates(cmd.Number); cerr == nil {
+			aliases = append(aliases, candidates...)
+		}
+		entry := config.Conversation{
+			Number: "+" + phone.Digits(cmd.Number), JID: jid.String(),
+			Aliases: aliases, Label: label, Actions: config.ManagedActions,
+		}
+		if err := config.AppendManaged(cfg.StateDir, entry); err != nil {
+			log.Printf("control %d: %v", uid, err)
+			notify(sender, "control: not added", err.Error())
+			return true
+		}
+		if err := h.reload(); err != nil {
+			log.Printf("control %d: added %s but reload failed: %v", uid, entry.Number, err)
+			notify(sender, "control: added, restart needed", err.Error())
+			return true
+		}
+		log.Printf("control %d: allow-listed %s (%s) as %s, read+draft only",
+			uid, entry.Number, label, jid)
+		notify(sender, "control: added "+label,
+			fmt.Sprintf("%s (%s) is allow-listed for read and draft.\n\nSending to this conversation is not granted; that stays a hand edit.", entry.Number, label))
+
+	case control.Remove:
+		jid, err := client.Resolve(ctx, cmd.Number)
+		if err != nil {
+			notify(sender, "control: not removed", fmt.Sprintf("%s: %v", cmd.Number, err))
+			return true
+		}
+		if err := config.RemoveManaged(cfg.StateDir, jid.String()); err != nil {
+			log.Printf("control %d: %v", uid, err)
+			notify(sender, "control: not removed", err.Error())
+			return true
+		}
+		if err := h.reload(); err != nil {
+			log.Printf("control %d: removed but reload failed: %v", uid, err)
+		}
+		log.Printf("control %d: removed %s", uid, cmd.Number)
+		notify(sender, "control: removed", cmd.Number+" is no longer allow-listed.")
+	}
+	return true
+}
+
+// notify answers a control command, and never fails the command if it cannot.
+func notify(sender mail.Config, subject, body string) {
+	if err := sender.SendNotice(subject, body); err != nil {
+		log.Printf("control: could not reply: %v", err)
+	}
+}
+
+func containsFold(list []string, want string) bool {
+	for _, v := range list {
+		if strings.EqualFold(strings.TrimSpace(v), want) {
+			return true
+		}
+	}
+	return false
 }
 
 // deliver puts an approved candidate on WhatsApp, one bubble at a time.

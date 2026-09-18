@@ -162,3 +162,46 @@ func normalizeNewlines(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	return strings.ReplaceAll(s, "\n", "\r\n")
 }
+
+// SendNotice sends a plain message from the control address to the assistant.
+//
+// Used to answer control commands. It is not a forward: no conversation, no
+// token, nothing that could be mistaken for a message from a contact.
+func (c Config) SendNotice(subject, body string) error {
+	sender := "control@" + c.Domain
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "From: wa-bridge <%s>\r\n", sender)
+	fmt.Fprintf(&b, "To: %s\r\n", c.Assistant)
+	fmt.Fprintf(&b, "Subject: %s\r\n", encodeWord(subject))
+	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
+	b.WriteString("Auto-Submitted: auto-replied\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+	b.WriteString(normalizeNewlines(body))
+	b.WriteString("\r\n")
+
+	client, err := c.dial()
+	if err != nil {
+		return err
+	}
+	defer client.Quit()
+
+	if err := client.Auth(smtp.PlainAuth("", c.User, c.Password, c.Host)); err != nil {
+		return fmt.Errorf("mail: authenticating as %s: %w", c.User, err)
+	}
+	if err := client.Mail(sender); err != nil {
+		return fmt.Errorf("mail: sender %s refused: %w", sender, err)
+	}
+	if err := client.Rcpt(c.Assistant); err != nil {
+		return fmt.Errorf("mail: recipient %s refused: %w", c.Assistant, err)
+	}
+	w, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write([]byte(b.String())); err != nil {
+		return err
+	}
+	return w.Close()
+}

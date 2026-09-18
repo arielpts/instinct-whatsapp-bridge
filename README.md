@@ -133,9 +133,20 @@ for all development.
 
 - **SEC-1 — Explicit permissions.** Permissions are per conversation and per
   action (`read`, `draft`, `send`). No wildcards. Anything not granted is denied.
-  Changing the allowlist requires editing the config file on the box and a
-  restart — never by email, never by message, and never by an environment
-  variable (§9.1).
+  Nothing in a message body or an environment variable can change a permission
+  (§9.1).
+- **SEC-1a — Delegated read, never delegated reach.** The assistant may add a
+  conversation by writing to a dedicated control address, which grants `read`
+  and `draft` and nothing else. `send` is never delegable and stays a hand edit
+  on the box: adding a conversation decides what the assistant *reads*, granting
+  send decides who it may *message*, and those are different questions with
+  different blast radii. Additions land in a separate file the bridge owns, are
+  clamped by the loader rather than by the writer — so hand-editing that file
+  cannot lift the limit — and are capped in number, because the difference
+  between delegating the allowlist and delegating the account is a runaway loop.
+  Commands are recognised by the *address* they arrive at, never by their
+  content, so `SEC-4` is unaffected: no text in a conversation can be read as an
+  instruction, and no command address can put words on WhatsApp.
 - **SEC-2 — Authenticated email in both directions.** Forwards are DKIM-signed and
   carry an HMAC in both the subject token and the `Message-ID` (§7.1). Inbound
   mail is accepted only if every one of these holds: the `From` is the single
