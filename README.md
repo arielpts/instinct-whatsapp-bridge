@@ -689,6 +689,9 @@ criterion holds.
       ASCII over SSH
 - [ ] `*events.Message` handling for text; reconnect and keepalive survive a network drop
 - [ ] `*events.HistorySync` discarded unconditionally, with a test (`SEC-9`)
+- [ ] Prune contacts on a schedule inside `run`, not only after pairing.
+      Measured on a live account: 3,306 contact rows after one pair. Every
+      reconnect re-syncs, so a one-off prune is a one-off reprieve (`SEC-9`)
 - [ ] Read receipts and chat presence verified off (`SEC-10`)
 - [ ] Allowlist filter with an empty default (`SEC-1`)
 - [ ] Sign-up command: candidate generation, `IsOnWhatsApp` resolution, alias
