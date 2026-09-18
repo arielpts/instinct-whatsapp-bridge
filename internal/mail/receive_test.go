@@ -129,3 +129,39 @@ func TestMissingRecipientIsRejected(t *testing.T) {
 		t.Errorf("want ErrNoRecipient, got %v", err)
 	}
 }
+
+// Instinct sends text/plain with quoted-printable, as most senders do. An
+// undecoded body reads fine in ASCII and mangles every accented word, so the
+// mistake ships looking correct.
+func TestQuotedPrintableBodyIsDecoded(t *testing.T) {
+	msg := "X-Envelope-To: 5541996616614@ariel.example.com\r\n" +
+		"From: assistant@mail.instinct.test\r\n" +
+		"Subject: Teste da ponte\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n" +
+		"Content-Transfer-Encoding: quoted-printable\r\n\r\n" +
+		"[wa:abcdefgh23456722]\r\n" +
+		"n=C3=A3o consigo hoje, s=C3=B3 amanh=C3=A3\r\n"
+	r, err := Parse([]byte(msg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.Text, "não consigo hoje, só amanhã") {
+		t.Errorf("body not decoded: %q", r.Text)
+	}
+}
+
+func TestBase64BodyIsDecoded(t *testing.T) {
+	// "olá" in base64.
+	msg := "X-Envelope-To: 5541996616614@ariel.example.com\r\n" +
+		"From: a@b.test\r\nSubject: x\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n" +
+		"b2zDoQ==\r\n"
+	r, err := Parse([]byte(msg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.Text, "olá") {
+		t.Errorf("body not decoded: %q", r.Text)
+	}
+}

@@ -1,11 +1,13 @@
 package mail
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net/mail"
 	"strings"
 )
@@ -72,7 +74,8 @@ func Parse(raw []byte) (*Received, error) {
 		r.AuthservID, r.AuthResult = splitAuthResults(ar)
 	}
 
-	text, err := textPart(msg.Header.Get("Content-Type"), msg.Body)
+	text, err := textPart(msg.Header.Get("Content-Type"),
+		msg.Header.Get("Content-Transfer-Encoding"), msg.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -132,11 +135,28 @@ func (r *Received) DKIMDomain() string {
 	return ""
 }
 
+// decoded wraps a body reader according to its transfer encoding.
+//
+// Real senders use quoted-printable as a matter of course, and an undecoded
+// body turns "n=C3=A3o" into the message. Pure ASCII survives the mistake
+// intact, which is exactly why it would have shipped: the first test message
+// looks perfect and every accented one after it is corrupted.
+func decoded(encoding string, r io.Reader) io.Reader {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "quoted-printable":
+		return quotedprintable.NewReader(r)
+	case "base64":
+		return base64.NewDecoder(base64.StdEncoding, r)
+	default:
+		return r
+	}
+}
+
 // textPart walks a message for its text/plain content.
 //
 // HTML-only messages return ErrNoText rather than being converted: SEC-12
 // rejects what it cannot read plainly instead of guessing at the words.
-func textPart(contentType string, body io.Reader) (string, error) {
+func textPart(contentType, encoding string, body io.Reader) (string, error) {
 	if contentType == "" {
 		contentType = "text/plain"
 	}
@@ -149,7 +169,7 @@ func textPart(contentType string, body io.Reader) (string, error) {
 		if mediaType != "text/plain" {
 			return "", ErrNoText
 		}
-		b, err := io.ReadAll(body)
+		b, err := io.ReadAll(decoded(encoding, body))
 		if err != nil {
 			return "", err
 		}
@@ -170,16 +190,18 @@ func textPart(contentType string, body io.Reader) (string, error) {
 			return "", err
 		}
 		partType := part.Header.Get("Content-Type")
-		media, partParams, _ := mime.ParseMediaType(partType)
+		// Go hides quoted-printable on multipart parts and decodes them as
+		// they are read; base64 it leaves to us.
+		partEncoding := part.Header.Get("Content-Transfer-Encoding")
+		media, _, _ := mime.ParseMediaType(partType)
 		switch {
 		case strings.HasPrefix(media, "multipart/"):
 			// Nested, as multipart/mixed wrapping multipart/alternative.
-			if inner, err := textPart(partType, part); err == nil {
+			if inner, err := textPart(partType, partEncoding, part); err == nil {
 				return inner, nil
 			}
-			_ = partParams
 		case media == "text/plain" || partType == "":
-			b, err := io.ReadAll(part)
+			b, err := io.ReadAll(decoded(partEncoding, part))
 			if err != nil {
 				return "", err
 			}
