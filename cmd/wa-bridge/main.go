@@ -18,6 +18,8 @@ import (
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/phone"
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/reply"
 
+	"go.mau.fi/whatsmeow/types"
+
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/config"
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/store"
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/wa"
@@ -329,7 +331,14 @@ func run(ctx context.Context) error {
 	log.Printf("%s", cfg.Summary())
 	log.Printf("forwarding %d conversation(s) to %s; polling %s for replies",
 		len(allowed), cfg.AssistantAddress, cfg.IMAPHost)
-	log.Printf("nothing is sent to WhatsApp: no send path is built yet")
+	switch {
+	case cfg.Mode == config.ModeApproveExcept:
+		log.Printf("mode=%s: approved replies are sent without asking; "+
+			"`touch %s/%s` stops sending immediately",
+			cfg.Mode, cfg.StateDir, store.PanicFile)
+	default:
+		log.Printf("mode=%s: nothing is sent to WhatsApp", cfg.Mode)
+	}
 
 	inbox := mail.Inbox{
 		Host: cfg.IMAPHost, Port: cfg.IMAPPort,
@@ -359,7 +368,7 @@ func run(ctx context.Context) error {
 	for {
 		select {
 		case <-poll.C:
-			if err := pollOnce(ctx, st, cfg, inbox); err != nil {
+			if err := pollOnce(ctx, st, cfg, client, inbox); err != nil {
 				log.Printf("polling: %v", err)
 			}
 
@@ -445,15 +454,15 @@ func forward(ctx context.Context, st *store.Store, cfg *config.Config, sender ma
 // Rejections are marked seen as well as accepted messages. A rejected reply
 // that stayed unread would be re-examined forever, and SEC-11 wants a count
 // rather than a retry: the reasons are logged, the contents are not.
-func pollOnce(ctx context.Context, st *store.Store, cfg *config.Config, inbox mail.Inbox) error {
+func pollOnce(ctx context.Context, st *store.Store, cfg *config.Config, client *wa.Client, inbox mail.Inbox) error {
 	return inbox.Poll(20, func(m mail.Message) bool {
-		return handle(ctx, st, cfg, m)
+		return handle(ctx, st, cfg, client, m)
 	})
 }
 
 // handle reports whether the message reached a terminal outcome. A transient
 // failure returns false, leaving it unread to be tried again.
-func handle(ctx context.Context, st *store.Store, cfg *config.Config, m mail.Message) bool {
+func handle(ctx context.Context, st *store.Store, cfg *config.Config, client *wa.Client, m mail.Message) bool {
 	r, err := mail.Parse(m.Raw)
 	if err != nil {
 		log.Printf("mail %d: unreadable: %v", m.UID, err)
@@ -484,9 +493,97 @@ func handle(ctx context.Context, st *store.Store, cfg *config.Config, m mail.Mes
 		log.Printf("mail %d: queueing: %v", m.UID, err)
 		return false // transient; try again rather than lose the reply
 	}
-	log.Printf("candidate %d for %s: %d bubble(s), awaiting approval [mode %s]",
+	log.Printf("candidate %d for %s: %d bubble(s) [mode %s]",
 		id, v.Conversation.Label, len(v.Bubbles), cfg.Mode)
+
+	// Standing authorization: the conversation must grant send, and the mode
+	// must be the one that does not ask. Everything else waits.
+	if cfg.Mode == config.ModeApproveExcept && v.Conversation.Can(config.ActionSend) {
+		deliver(ctx, st, cfg, client, id, v.Conversation)
+	} else {
+		log.Printf("candidate %d awaits approval: mode=%s send=%v",
+			id, cfg.Mode, v.Conversation.Can(config.ActionSend))
+	}
 	return true
+}
+
+// deliver puts an approved candidate on WhatsApp, one bubble at a time.
+//
+// The checks are per bubble, not per candidate. A kill switch engaged halfway
+// through a five-bubble reply should stop it halfway, and a quota reached on
+// the third bubble should send two.
+func deliver(ctx context.Context, st *store.Store, cfg *config.Config, client *wa.Client, id int64, conv config.Conversation) {
+	to, err := types.ParseJID(conv.JID)
+	if err != nil {
+		log.Printf("candidate %d: unusable jid %q: %v", id, conv.JID, err)
+		_ = st.Resolve(ctx, id, store.StateFailed, "unusable jid")
+		return
+	}
+	bubbles, err := st.Bubbles(ctx, id)
+	if err != nil {
+		log.Printf("candidate %d: reading bubbles: %v", id, err)
+		return
+	}
+
+	sent := 0
+	for _, b := range bubbles {
+		if b.Sent {
+			continue // a resumed delivery never repeats what arrived
+		}
+		if err := store.CheckHalt(cfg.StateDir); err != nil {
+			log.Printf("candidate %d: stopped at bubble %d: %v", id, b.Index+1, err)
+			_ = st.Resolve(ctx, id, store.StatePartial, err.Error())
+			return
+		}
+		if err := withinQuota(ctx, st, cfg, conv.JID); err != nil {
+			log.Printf("candidate %d: stopped at bubble %d: %v", id, b.Index+1, err)
+			_ = st.Resolve(ctx, id, store.StatePartial, err.Error())
+			return
+		}
+
+		waID, err := client.SendText(ctx, to, b.Body, nil)
+		if err != nil {
+			log.Printf("candidate %d: bubble %d failed: %v", id, b.Index+1, err)
+			_ = st.Resolve(ctx, id, store.StatePartial, err.Error())
+			return
+		}
+		if err := st.MarkBubbleSent(ctx, id, b.Index, conv.JID, waID); err != nil {
+			// Sent but unrecorded. Stop rather than risk resending it.
+			log.Printf("candidate %d: bubble %d sent but not recorded: %v", id, b.Index+1, err)
+			_ = st.Resolve(ctx, id, store.StateFailed, "sent but not recorded")
+			return
+		}
+		sent++
+
+		// A reply should not land as a burst.
+		select {
+		case <-time.After(time.Duration(cfg.Limits.BubblePauseMS) * time.Millisecond):
+		case <-ctx.Done():
+			_ = st.Resolve(ctx, id, store.StatePartial, "shutting down")
+			return
+		}
+	}
+	_ = st.Resolve(ctx, id, store.StateSent, "")
+	log.Printf("candidate %d: sent %d bubble(s) to %s", id, sent, conv.Label)
+}
+
+// withinQuota enforces both caps, counted in bubbles (SEC-6).
+func withinQuota(ctx context.Context, st *store.Store, cfg *config.Config, conversation string) error {
+	hour, err := st.SendsSince(ctx, conversation, time.Now().Add(-time.Hour))
+	if err != nil {
+		return fmt.Errorf("quota unreadable: %w", err) // fail closed
+	}
+	if hour >= cfg.Limits.PerConversationPerHour {
+		return fmt.Errorf("per-conversation cap reached: %d in the last hour", hour)
+	}
+	day, err := st.SendsSince(ctx, "", time.Now().Add(-24*time.Hour))
+	if err != nil {
+		return fmt.Errorf("quota unreadable: %w", err)
+	}
+	if day >= cfg.Limits.PerDayTotal {
+		return fmt.Errorf("daily cap reached: %d in the last day", day)
+	}
+	return nil
 }
 
 // resend retries a message that was recorded but never forwarded. The token is
