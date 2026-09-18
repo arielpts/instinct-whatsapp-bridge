@@ -388,6 +388,9 @@ func run(ctx context.Context) error {
 	poll := time.NewTicker(30 * time.Second)
 	defer poll.Stop()
 
+	// retryAfter holds off resending while the provider is refusing on volume.
+	var retryAfter time.Time
+
 	// A failed send leaves the message recorded but unforwarded. Retry it, or
 	// a transient SMTP failure is a silent deletion: WhatsApp will not send it
 	// again, and deduplication would refuse it if it did.
@@ -407,13 +410,25 @@ func run(ctx context.Context) error {
 			}
 
 		case <-retry.C:
+			// The provider refuses on volume, not on the message. Retrying
+			// into that every minute is how an account gets flagged, so wait
+			// it out and say so once rather than each time.
+			if time.Now().Before(retryAfter) {
+				break
+			}
 			pending, err := st.Pending(ctx, time.Now().Add(-30*time.Second), 20)
 			if err != nil {
 				log.Printf("looking for unforwarded messages: %v", err)
 				break
 			}
 			for _, p := range pending {
-				resend(ctx, st, h.get(), sender, p)
+				if err := resend(ctx, st, h.get(), sender, p); mail.IsRateLimited(err) {
+					retryAfter = time.Now().Add(retryBackoff)
+					log.Printf("the mail provider is refusing on volume; "+
+						"holding %d message(s) until %s",
+						len(pending), retryAfter.Format("15:04"))
+					break
+				}
 			}
 
 		case <-prune.C:
@@ -760,15 +775,17 @@ func withinQuota(ctx context.Context, st *store.Store, cfg *config.Config, conve
 
 // resend retries a message that was recorded but never forwarded. The token is
 // derived from the binding, so re-issuing yields the one already promised.
-func resend(ctx context.Context, st *store.Store, cfg *config.Config, sender mail.Config, p store.Pending) {
+const retryBackoff = 30 * time.Minute
+
+func resend(ctx context.Context, st *store.Store, cfg *config.Config, sender mail.Config, p store.Pending) error {
 	tok, err := st.IssueToken(ctx, cfg.HMACKey, p.Conversation, p.MessageID)
 	if err != nil {
 		log.Printf("retry %s: issuing a token: %v", p.MessageID, err)
-		return
+		return nil
 	}
 	conv, ok := cfg.Lookup(p.Conversation)
 	if !ok {
-		return // no longer allow-listed; leave it unforwarded
+		return nil // no longer allow-listed; leave it unforwarded
 	}
 	number := phone.Digits(conv.Number)
 	name := conv.Label
@@ -780,13 +797,16 @@ func resend(ctx context.Context, st *store.Store, cfg *config.Config, sender mai
 		MessageID: p.MessageID, HMAC: tok,
 		Timestamp: p.Received, Body: p.Body,
 	}); err != nil {
-		log.Printf("retry %s: %v", p.MessageID, err)
-		return
+		if !mail.IsRateLimited(err) {
+			log.Printf("retry %s: %v", p.MessageID, err)
+		}
+		return err
 	}
 	if err := st.MarkForwarded(ctx, p.MessageID); err != nil {
 		log.Printf("retry %s: marking forwarded: %v", p.MessageID, err)
 	}
 	log.Printf("forwarded %s (retry) from %s as [wa:%s]", p.MessageID, name, tok)
+	return nil
 }
 
 func unpair(ctx context.Context) error {

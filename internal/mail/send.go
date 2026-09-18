@@ -28,6 +28,32 @@ type Config struct {
 
 func (c Config) addr() string { return net.JoinHostPort(c.Host, fmt.Sprint(c.Port)) }
 
+// IsRateLimited reports whether an error is the provider refusing on volume
+// rather than on the message.
+//
+// Retrying into a rate limit every minute is how an account gets flagged for
+// abuse. The condition clears with time, not with persistence.
+func IsRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"outgoing limits",
+		"rate limit",
+		"too many messages",
+		"4.7.0",
+		"5.7.1",
+		"452 ",
+		"421 ",
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // Forward is one message to hand to the assistant.
 type Forward struct {
 	Number      string // E.164 digits, the conversation's address local part
