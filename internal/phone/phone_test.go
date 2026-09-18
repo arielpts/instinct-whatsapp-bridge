@@ -87,3 +87,17 @@ func TestParseJIDRejectsGroups(t *testing.T) {
 		t.Errorf("groups must be rejected, got %v", err)
 	}
 }
+
+func TestNinthDigitVariant(t *testing.T) {
+	cases := map[string]string{
+		"5541996616614": "554196616614",  // has the ninth digit -> without
+		"554196616614":  "5541996616614", // lacks it -> with
+		"551133334444":  "",              // landline has no counterpart
+		"14155550123":   "",              // not Brazilian
+	}
+	for in, want := range cases {
+		if got := NinthDigitVariant(in); got != want {
+			t.Errorf("NinthDigitVariant(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

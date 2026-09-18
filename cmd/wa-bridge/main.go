@@ -94,17 +94,11 @@ func pair(ctx context.Context, number string) error {
 	defer st.Close()
 	defer client.Disconnect()
 
-	if err := client.Connect(ctx); err != nil {
-		return fmt.Errorf("connecting: %w", err)
-	}
-	// whatsmeow needs the websocket established before it will mint a code,
-	// and the login socket closes after about 160 seconds -- so ask as early
-	// as the protocol allows and leave the operator the rest of the window.
-	time.Sleep(2 * time.Second)
-
+	// PairCode connects for us: the login channel must be opened before the
+	// socket, so the sequencing belongs with the client, not here.
 	code, err := client.PairCode(ctx, number)
 	if err != nil {
-		return fmt.Errorf("requesting a pairing code: %w", err)
+		return err
 	}
 
 	fmt.Printf(`

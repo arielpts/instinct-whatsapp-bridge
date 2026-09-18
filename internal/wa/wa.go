@@ -134,18 +134,62 @@ func (c *Client) PairQR(ctx context.Context) (<-chan whatsmeow.QRChannelItem, er
 // whatsmeow requires the websocket to be up first, and the login socket closes
 // after about 160 seconds, so the code is requested immediately after
 // connecting to leave the operator the most time to type it.
+// It connects on your behalf: the QR channel has to be opened before the
+// socket, and the first item on it is the signal that the connection is
+// established enough to mint a code. Sleeping instead races the server and
+// gets a bare 400 back.
 func (c *Client) PairCode(ctx context.Context, number string) (string, error) {
 	if c.wm.Store.ID != nil {
 		return "", errors.New("wa: already linked; delete the device store to re-pair")
 	}
-	if phone.Digits(number) == "" {
+	digits := phone.Digits(number)
+	if digits == "" {
 		return "", fmt.Errorf("wa: %q has no digits", number)
 	}
+
+	qr, err := c.wm.GetQRChannel(ctx)
+	if err != nil {
+		return "", fmt.Errorf("wa: opening the login channel: %w", err)
+	}
+	if err := c.wm.Connect(); err != nil {
+		return "", fmt.Errorf("wa: connecting: %w", err)
+	}
+	select {
+	case _, ok := <-qr:
+		if !ok {
+			return "", errors.New("wa: the login socket closed before pairing could start")
+		}
+	case <-time.After(30 * time.Second):
+		return "", errors.New("wa: the server never offered a login channel")
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+
 	// The number goes through untouched. whatsmeow strips punctuation itself,
 	// and the ninth-digit candidates are for finding *other* people's accounts
 	// -- the operator knows which number is their own, and reshaping it here
 	// would pair the wrong one.
-	return c.wm.PairPhone(ctx, number, true, whatsmeow.PairClientChrome, pairDisplayName)
+	code, err := c.wm.PairPhone(ctx, number, true, whatsmeow.PairClientChrome, pairDisplayName)
+	if err != nil {
+		return "", annotatePairError(err, digits)
+	}
+	return code, nil
+}
+
+// annotatePairError turns WhatsApp's contentless 400 into something actionable.
+//
+// The server rejects a pairing request for a number that has no account with
+// the same bare status it uses for a malformed one. For a Brazilian mobile
+// written without its ninth digit that is the likeliest cause by far, so say
+// so rather than leaving the operator to stare at "bad-request".
+func annotatePairError(err error, digits string) error {
+	alt := phone.NinthDigitVariant(digits)
+	if alt == "" {
+		return fmt.Errorf("wa: requesting a pairing code: %w", err)
+	}
+	return fmt.Errorf("wa: requesting a pairing code: %w\n"+
+		"      WhatsApp returns this for a number it has no account for.\n"+
+		"      This looks Brazilian, so try the other ninth-digit form: +%s", err, alt)
 }
 
 func (c *Client) handle(evt any) {

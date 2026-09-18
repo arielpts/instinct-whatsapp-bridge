@@ -129,3 +129,20 @@ func Candidates(input string) ([]string, error) {
 	}
 	return []string{without, with}, nil
 }
+
+// NinthDigitVariant returns the other Brazilian spelling of a number -- the
+// one with the ninth digit if it lacks one, or without if it has one -- or
+// empty when the number has no such counterpart.
+func NinthDigitVariant(input string) string {
+	candidates, err := Candidates(input)
+	if err != nil || len(candidates) != 2 {
+		return ""
+	}
+	d := Digits(input)
+	for _, c := range candidates {
+		if c != d {
+			return c
+		}
+	}
+	return ""
+}
