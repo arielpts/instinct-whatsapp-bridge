@@ -55,6 +55,13 @@ set the domain to **catch-all** to it. That single mailbox receives mail for
 every conversation address, and the bridge routes by the recipient it was sent
 to.
 
+## Doing it with the Cloudflare API
+
+If the zone is on Cloudflare, [`cloudflare-dns.sh`](cloudflare-dns.sh) creates
+all eight records in one run. Give it a token scoped to **Zone:DNS:Edit on that
+zone only**, and run it somewhere you control -- the bridge's own box is fine.
+Re-running updates rather than duplicates.
+
 ## Verifying
 
 ```sh
