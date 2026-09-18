@@ -48,14 +48,16 @@ func Verify(cfg *config.Config, r *mail.Received) (*Verified, error) {
 	if !containsFold(cfg.Instinct.FromAddresses, r.From) {
 		return nil, fmt.Errorf("%w: %s", ErrNotAllowlisted, r.From)
 	}
-	if !cfg.TrustsAuthserv(r.AuthservID) {
-		return nil, fmt.Errorf("%w: stamped by %q", ErrUntrustedStamp, r.AuthservID)
-	}
-	if r.Verdict("dkim") != "pass" {
-		return nil, fmt.Errorf("%w: dkim=%q", ErrDKIM, r.Verdict("dkim"))
-	}
-	if !containsFold(cfg.Instinct.DKIMDomains, r.DKIMDomain()) {
-		return nil, fmt.Errorf("%w: d=%s", ErrDKIM, r.DKIMDomain())
+	// The signature is checked in this process, against DNS, rather than read
+	// off a header. Mail arriving through the catch-all is stamped "none" by
+	// the provider -- no checks performed -- so the header would vouch for
+	// nothing on the very path every conversation uses.
+	if !r.SignedBy(cfg.Instinct.DKIMDomains) {
+		if r.DKIMError != nil {
+			return nil, fmt.Errorf("%w: %v", ErrDKIM, r.DKIMError)
+		}
+		return nil, fmt.Errorf("%w: verified signatures %v, allow-listed %v",
+			ErrDKIM, r.DKIMDomains, cfg.Instinct.DKIMDomains)
 	}
 
 	// SEC-13, first channel: the address the mail was delivered for.

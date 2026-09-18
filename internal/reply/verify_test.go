@@ -21,7 +21,9 @@ func message(mutate func(*mail.Received)) *mail.Received {
 		Subject:    "Re: [wa:abcdefgh23456722] Business",
 		AuthservID: "mx13.migadu.test",
 		AuthResult: "dkim=pass header.d=mail.instinct.test header.s=x; spf=pass",
-		Text:       "Consigo sim.\n---bubble---\nTe mando ate as 18h.\n",
+		// Verified in this process against DNS, not read off the header.
+		DKIMDomains: []string{"mail.instinct.test"},
+		Text:        "Consigo sim.\n---bubble---\nTe mando ate as 18h.\n",
 	}
 	if mutate != nil {
 		mutate(r)
@@ -75,12 +77,17 @@ func TestVerifyRejections(t *testing.T) {
 	}{
 		"a stranger": {
 			func(r *mail.Received) { r.From = "someone@elsewhere.test" }, ErrNotAllowlisted},
-		"stamped by someone else": {
-			func(r *mail.Received) { r.AuthservID = "mx13.attacker.test" }, ErrUntrustedStamp},
-		"dkim did not pass": {
-			func(r *mail.Received) { r.AuthResult = "dkim=fail header.d=mail.instinct.test" }, ErrDKIM},
-		"dkim passed for another domain": {
-			func(r *mail.Received) { r.AuthResult = "dkim=pass header.d=attacker.test" }, ErrDKIM},
+		"no signature verified": {
+			func(r *mail.Received) { r.DKIMDomains = nil }, ErrDKIM},
+		"signed by another domain": {
+			func(r *mail.Received) { r.DKIMDomains = []string{"attacker.test"} }, ErrDKIM},
+		// The provider stamps this on catch-all delivery. A header claiming a
+		// pass must not substitute for a signature we verified ourselves.
+		"header claims a pass with no verified signature": {
+			func(r *mail.Received) {
+				r.DKIMDomains = nil
+				r.AuthResult = "dkim=pass header.d=mail.instinct.test"
+			}, ErrDKIM},
 		"recipient on another domain": {
 			func(r *mail.Received) { r.EnvelopeTo = "5541996616614@attacker.test" }, ErrUnknownChat},
 		"recipient not allow-listed": {

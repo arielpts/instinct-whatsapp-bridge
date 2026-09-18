@@ -145,12 +145,14 @@ for all development.
   domains, permitted envelope/return-path domains, and — if Instinct publishes
   them — sending IP ranges. Empty by default; nothing is accepted until it is
   filled in from observed real mail.
-  Authentication results are trusted only from the `Authentication-Results`
-  header our own provider stamped on delivery. Any such header already present
-  in the message is stripped before evaluation, because a sender can write
-  those headers themselves. The stamp is matched on the provider's *domain*,
-  not one hostname: observed in the wild as `mx13.migadu.com`, and nothing
-  promises the next message arrives through mx13.
+  DKIM is verified **in this process, against DNS**, not read off a header.
+  The provider stamps `Authentication-Results` on straightforward delivery, but
+  a message routed through the catch-all pattern arrives stamped `none` — no
+  checks performed — which is the path every conversation uses. Trusting the
+  header would therefore have meant accepting unverified mail exactly where it
+  matters, while appearing to check. The signature itself is present and valid
+  either way, so verifying it ourselves costs nothing and removes the
+  dependency.
 - **SEC-3 — Visible confirmation before sending.** Approval requests state the
   resolved recipient (display name *and* the identifier) and the exact bytes to
   be sent — every bubble, numbered, in order. No abbreviation, no rendering that

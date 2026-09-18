@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"mime/quotedprintable"
 	"net/mail"
 	"strings"
+
+	"github.com/emersion/go-msgauth/dkim"
 )
 
 var (
@@ -24,9 +27,14 @@ type Received struct {
 	Subject    string
 	MessageID  string
 	InReplyTo  string
-	AuthservID string // the stamping host, for the SEC-14 trust check
+	AuthservID string // the stamping host, kept for the audit line
 	AuthResult string // that stamp's contents
 	Text       string // the text/plain part
+
+	// DKIMDomains are the d= of signatures this process verified itself,
+	// against DNS. Empty means nothing verified.
+	DKIMDomains []string
+	DKIMError   error // why verification found nothing, if it did not
 }
 
 // Parse reduces a raw message.
@@ -80,7 +88,45 @@ func Parse(raw []byte) (*Received, error) {
 		return nil, err
 	}
 	r.Text = text
+
+	// Verify signatures here rather than believing a header.
+	//
+	// The provider stamps Authentication-Results on straightforward delivery,
+	// but a message routed through a catch-all pattern arrives stamped
+	// "none": no checks performed. Trusting that header therefore means
+	// accepting unverified mail on exactly the path this bridge uses for
+	// every conversation. Checking the signature ourselves removes both the
+	// gap and the dependency.
+	r.DKIMDomains, r.DKIMError = verifyDKIM(raw)
 	return &r, nil
+}
+
+// verifyDKIM returns the domains whose signatures verify against DNS.
+func verifyDKIM(raw []byte) ([]string, error) {
+	verifications, err := dkim.Verify(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	var domains []string
+	for _, v := range verifications {
+		if v.Err != nil {
+			continue // a signature that does not verify is not a signature
+		}
+		domains = append(domains, strings.ToLower(v.Domain))
+	}
+	return domains, nil
+}
+
+// SignedBy reports whether a verified signature covers one of these domains.
+func (r *Received) SignedBy(domains []string) bool {
+	for _, signed := range r.DKIMDomains {
+		for _, want := range domains {
+			if strings.EqualFold(signed, strings.TrimSpace(want)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // addressOnly reduces a header to a bare lowercase address.
