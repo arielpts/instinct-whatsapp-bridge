@@ -440,8 +440,16 @@ A reply names its destination twice, and the two must agree:
 
 | Channel | Carries | Source |
 |---|---|---|
-| `To:` address | which contact | the address the assistant replied to |
+| `X-Envelope-To` | which contact | the address the mail was delivered for, stamped by the provider |
 | `[wa:…]` token | which conversation and message | echoed from the subject, or the first body line |
+
+The envelope header, not `To:`. The catch-all delivers every conversation's
+address into one mailbox, so `Delivered-To` says only which mailbox it landed
+in — confirmed on a real delivery, where it read `bridge@` while
+`X-Envelope-To` read `5541996616614@`. `To:` happens to agree, but the sender
+writes it and may list several addresses; the envelope header they do not
+write. Both headers can be forged further down the message, so only the first
+occurrence counts, the provider having prepended its own on delivery.
 
 **SEC-13 — Two-channel agreement.** The token is authoritative and the address is
 the cross-check. If the token resolves to one conversation and the address to
