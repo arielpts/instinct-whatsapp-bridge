@@ -763,12 +763,14 @@ criterion holds.
    (a local web page over Tailscale, say) worth the extra moving part?
 3. Standing authorizations (`approve-except`) were left open in the original
    conversation. Which concrete case justifies one, if any?
-4. Identity: WhatsApp is migrating addressing from phone-number JIDs to LIDs, and
-   the two do not always map cleanly (WAHA carries open issues about exactly this
-   mismatch). The allowlist matches on identity, so getting this wrong means
-   either dropping wanted messages or, worse, matching an unintended one. Decide
-   what the allowlist keys on, and how a JID/LID change is detected rather than
-   silently re-matched.
+4. *(Settled by observation.)* `IsOnWhatsApp` answers with a **LID**
+   (`270565893996711@lid`), not a phone-number JID, for a number that plainly
+   has one. A LID identifies the account and says nothing about the number, so
+   the allowlist carries both — the LID and both ninth-digit spellings — since a
+   chat may be addressed either way, and the email address is built from the
+   configured number rather than from the identifier. What remains open is
+   whether a LID can change for a stable account; if it can, a conversation
+   would silently stop matching.
 5. **Blocking for M0:** can Instinct send from, and receive at,
    `assistant@mail.instinct.com`, and what DKIM `d=` domain does its outbound
    mail carry? SEC-2 pins the accepted sender to exactly that, so this must be

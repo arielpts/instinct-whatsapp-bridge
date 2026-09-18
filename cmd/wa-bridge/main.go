@@ -9,11 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/mail"
+	"github.com/arielpts/instinct-whatsapp-bridge/internal/phone"
 
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/config"
 	"github.com/arielpts/instinct-whatsapp-bridge/internal/store"
@@ -308,8 +310,24 @@ func run(ctx context.Context) error {
 			log.Printf("issuing a token for %s: %v", in.MessageID, err)
 			return
 		}
-		number, _ := strings.CutSuffix(in.Conversation, "@s.whatsapp.net")
+		// The address is the contact's number. Deriving it from the
+		// conversation JID would put a LID in the local part -- an identifier
+		// that is not a phone number and means nothing to a human reading the
+		// mailbox (README 6.3).
+		conv, ok := cfg.Lookup(in.Conversation)
+		if !ok {
+			log.Printf("no conversation for %s; not forwarding", in.Conversation)
+			return
+		}
+		number := phone.Digits(conv.Number)
+		if number == "" {
+			log.Printf("conversation %q has no number to address mail from", conv.Label)
+			return
+		}
 		name := in.SenderName
+		if name == "" {
+			name = conv.Label
+		}
 		if name == "" {
 			name = "+" + number
 		}
@@ -397,17 +415,42 @@ func signup(ctx context.Context, number string) error {
 	if err != nil {
 		return err
 	}
+
+	// WhatsApp increasingly answers with a LID rather than a phone-number JID.
+	// A LID identifies the account but says nothing about the number, so the
+	// allowlist has to match on both: messages may arrive addressed either way,
+	// and the email address is built from the number, never from this.
+	aliases := []string{jid.User}
+	if candidates, cerr := phone.Candidates(number); cerr == nil {
+		aliases = append(aliases, candidates...)
+	}
+
 	fmt.Printf(`
-  %s resolves to:
+  %s resolves to %s
 
-    jid     = "%s"
-    aliases = ["%s"]
+  Paste into config.toml:
 
-  Copy that into a [[conversation]] block in config.toml. It is the account
-  WhatsApp actually has -- not a number reshaped by guesswork.
+[[conversation]]
+number  = "%s"
+jid     = "%s"
+aliases = [%s]
+label   = "..."
+actions = ["read", "draft"]
 
-`, number, jid.String(), jid.User)
+  The aliases carry both the account identifier and both spellings of the
+  number, because a chat may be addressed either way. The email address is
+  built from number, not from jid.
+
+`, number, jid.String(), "+"+phone.Digits(number), jid.String(), quoteList(aliases))
 	return nil
+}
+
+func quoteList(items []string) string {
+	out := make([]string, len(items))
+	for i, s := range items {
+		out[i] = strconv.Quote(s)
+	}
+	return strings.Join(out, ", ")
 }
 
 func status(ctx context.Context) error {

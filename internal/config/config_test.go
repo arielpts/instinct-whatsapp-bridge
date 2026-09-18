@@ -164,3 +164,39 @@ func TestLimitDefaults(t *testing.T) {
 		t.Errorf("partial limits not merged: %+v", c.Limits)
 	}
 }
+
+// WhatsApp answers with a LID as readily as a phone JID, and a chat may be
+// addressed either way, so both have to reach the same conversation.
+func TestLIDAndPhoneJIDResolveToOneConversation(t *testing.T) {
+	f := file()
+	f.Conversations = []Conversation{{
+		Number:  "+55 41 99661-6614",
+		JID:     "270565893996711@lid",
+		Aliases: []string{"270565893996711", "5541996616614", "554196616614"},
+		Label:   "Ariel",
+		Actions: []string{ActionRead, ActionDraft},
+	}}
+	c, err := build(base(), f, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, addressing := range []string{
+		"270565893996711@lid",          // as a LID
+		"5541996616614@s.whatsapp.net", // with the ninth digit
+		"554196616614@s.whatsapp.net",  // without it
+		"+55 41 99661-6614",            // as a human writes it
+	} {
+		conv, ok := c.Lookup(addressing)
+		if !ok || conv.Label != "Ariel" {
+			t.Errorf("%q resolved to %q, %v", addressing, conv.Label, ok)
+		}
+		if !c.Allowed(addressing) {
+			t.Errorf("%q is not allowed", addressing)
+		}
+	}
+	// The address is built from the number, never from the LID.
+	conv, _ := c.Lookup("270565893996711@lid")
+	if conv.Number == "" {
+		t.Error("conversation carries no number to address mail from")
+	}
+}
