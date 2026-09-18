@@ -232,7 +232,7 @@ func Load() (*Config, error) {
 		IMAPUser:         env("WA_BRIDGE_IMAP_USER"),
 		IMAPPassword:     os.Getenv("WA_BRIDGE_IMAP_PASSWORD"),
 		SMTPHost:         env("WA_BRIDGE_SMTP_HOST"),
-		SMTPPort:         envInt("WA_BRIDGE_SMTP_PORT", 465),
+		SMTPPort:         envInt("WA_BRIDGE_SMTP_PORT", 587),
 		SMTPUser:         env("WA_BRIDGE_SMTP_USER"),
 		SMTPPassword:     os.Getenv("WA_BRIDGE_SMTP_PASSWORD"),
 		HMACKey:          []byte(os.Getenv("WA_BRIDGE_HMAC_KEY")),

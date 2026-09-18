@@ -295,55 +295,29 @@ func run(ctx context.Context) error {
 		Domain: cfg.MailDomain, Assistant: cfg.AssistantAddress,
 	}
 
+	// Forwarding happens off the event handler.
+	//
+	// whatsmeow dispatches events synchronously, so an SMTP round-trip inside
+	// the handler stalls the socket's node processing -- observed as "node
+	// handling is taking long" while a blocked submission port swallowed the
+	// connection. Queue instead, and let one worker send.
+	queue := make(chan wa.Inbound, 64)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for in := range queue {
+			forward(ctx, st, cfg, sender, in)
+		}
+	}()
+
 	client.OnMessage(cfg, func(in wa.Inbound) {
-		// Record first. A message recorded but not forwarded can be chased up;
-		// one forwarded but not recorded is forwarded again on the next
-		// delivery (FR-9).
-		if err := st.RecordForward(ctx, in.MessageID, in.Conversation, in.SenderJID, in.Text); err != nil {
-			if !errors.Is(err, store.ErrDuplicate) {
-				log.Printf("recording %s: %v", in.MessageID, err)
-			}
-			return
+		select {
+		case queue <- in:
+		default:
+			// Dropping is better than blocking the socket. The message stays
+			// unrecorded, so WhatsApp redelivering it is a second chance.
+			log.Printf("forward queue full; %s not taken", in.MessageID)
 		}
-		tok, err := st.IssueToken(ctx, cfg.HMACKey, in.Conversation, in.MessageID)
-		if err != nil {
-			log.Printf("issuing a token for %s: %v", in.MessageID, err)
-			return
-		}
-		// The address is the contact's number. Deriving it from the
-		// conversation JID would put a LID in the local part -- an identifier
-		// that is not a phone number and means nothing to a human reading the
-		// mailbox (README 6.3).
-		conv, ok := cfg.Lookup(in.Conversation)
-		if !ok {
-			log.Printf("no conversation for %s; not forwarding", in.Conversation)
-			return
-		}
-		number := phone.Digits(conv.Number)
-		if number == "" {
-			log.Printf("conversation %q has no number to address mail from", conv.Label)
-			return
-		}
-		name := in.SenderName
-		if name == "" {
-			name = conv.Label
-		}
-		if name == "" {
-			name = "+" + number
-		}
-		f := mail.Forward{
-			Number: number, DisplayName: name, Token: tok,
-			MessageID: in.MessageID, HMAC: tok,
-			Timestamp: in.Timestamp, Body: in.Text,
-		}
-		if err := sender.Send(f); err != nil {
-			log.Printf("forwarding %s: %v", in.MessageID, err)
-			return
-		}
-		if err := st.MarkForwarded(ctx, in.MessageID); err != nil {
-			log.Printf("marking %s forwarded: %v", in.MessageID, err)
-		}
-		log.Printf("forwarded %s from %s as [wa:%s]", in.MessageID, name, tok)
 	})
 
 	if err := client.Connect(ctx); err != nil {
@@ -372,10 +346,61 @@ func run(ctx context.Context) error {
 				log.Printf("purged %d message bodies past retention", n)
 			}
 		case <-ctx.Done():
+			close(queue)
+			<-done // let an in-flight send finish rather than truncating it
 			log.Printf("stopped; %d history syncs discarded", client.DroppedHistorySyncs())
 			return nil
 		}
 	}
+}
+
+// forward turns one inbound message into one email.
+func forward(ctx context.Context, st *store.Store, cfg *config.Config, sender mail.Config, in wa.Inbound) {
+	// Record first. A message recorded but not forwarded can be chased up; one
+	// forwarded but not recorded is forwarded again on the next delivery (FR-9).
+	if err := st.RecordForward(ctx, in.MessageID, in.Conversation, in.SenderJID, in.Text); err != nil {
+		if !errors.Is(err, store.ErrDuplicate) {
+			log.Printf("recording %s: %v", in.MessageID, err)
+		}
+		return
+	}
+	tok, err := st.IssueToken(ctx, cfg.HMACKey, in.Conversation, in.MessageID)
+	if err != nil {
+		log.Printf("issuing a token for %s: %v", in.MessageID, err)
+		return
+	}
+	// The address is the contact's number. Deriving it from the conversation
+	// JID would put a LID in the local part -- an identifier that is not a
+	// phone number and means nothing to a human reading the mailbox (6.3).
+	conv, ok := cfg.Lookup(in.Conversation)
+	if !ok {
+		log.Printf("no conversation for %s; not forwarding", in.Conversation)
+		return
+	}
+	number := phone.Digits(conv.Number)
+	if number == "" {
+		log.Printf("conversation %q has no number to address mail from", conv.Label)
+		return
+	}
+	name := in.SenderName
+	if name == "" {
+		name = conv.Label
+	}
+	if name == "" {
+		name = "+" + number
+	}
+	if err := sender.Send(mail.Forward{
+		Number: number, DisplayName: name, Token: tok,
+		MessageID: in.MessageID, HMAC: tok,
+		Timestamp: in.Timestamp, Body: in.Text,
+	}); err != nil {
+		log.Printf("forwarding %s: %v", in.MessageID, err)
+		return
+	}
+	if err := st.MarkForwarded(ctx, in.MessageID); err != nil {
+		log.Printf("marking %s forwarded: %v", in.MessageID, err)
+	}
+	log.Printf("forwarded %s from %s as [wa:%s]", in.MessageID, name, tok)
 }
 
 func unpair(ctx context.Context) error {

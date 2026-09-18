@@ -105,18 +105,33 @@ func (c Config) Send(f Forward) error {
 	return w.Close()
 }
 
+// dialTimeout bounds the connection attempt.
+//
+// A blocked submission port does not refuse, it swallows: the connection sits
+// there until something gives up. Hosts commonly block 25 and 465 outbound --
+// Hetzner does, on new accounts -- so this fails in seconds with a message
+// naming the port instead of hanging indefinitely.
+const dialTimeout = 20 * time.Second
+
 // dial handles both submission styles: implicit TLS on 465, STARTTLS on 587.
 func (c Config) dial() (*smtp.Client, error) {
+	dialer := &net.Dialer{Timeout: dialTimeout}
+
 	if c.Port == 465 {
-		conn, err := tls.Dial("tcp", c.addr(), &tls.Config{ServerName: c.Host})
+		conn, err := tls.DialWithDialer(dialer, "tcp", c.addr(), &tls.Config{ServerName: c.Host})
 		if err != nil {
-			return nil, fmt.Errorf("mail: connecting to %s: %w", c.addr(), err)
+			return nil, fmt.Errorf("mail: connecting to %s: %w (many hosts block 465 outbound; try 587)", c.addr(), err)
 		}
 		return smtp.NewClient(conn, c.Host)
 	}
-	client, err := smtp.Dial(c.addr())
+	conn, err := dialer.Dial("tcp", c.addr())
 	if err != nil {
 		return nil, fmt.Errorf("mail: connecting to %s: %w", c.addr(), err)
+	}
+	client, err := smtp.NewClient(conn, c.Host)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("mail: greeting from %s: %w", c.Host, err)
 	}
 	if err := client.StartTLS(&tls.Config{ServerName: c.Host}); err != nil {
 		client.Close()
