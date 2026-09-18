@@ -72,9 +72,15 @@ type Instinct struct {
 	DKIMDomains     []string `toml:"dkim_domains"`
 	EnvelopeDomains []string `toml:"envelope_domains"`
 	IPRanges        []string `toml:"ip_ranges"`
-	// AuthservID names our own provider: the only Authentication-Results stamp
-	// we trust, because a sender can write those headers themselves.
-	AuthservID string `toml:"authserv_id"`
+	// AuthservDomain names our own provider's stamping hosts: the only
+	// Authentication-Results we trust, because a sender can write those
+	// headers themselves.
+	//
+	// A domain rather than a hostname, because providers stamp with whichever
+	// MX handled the message -- observed as mx13.migadu.com, with no promise
+	// the next one is mx13. Pinning the hostname would reject real mail the
+	// moment it arrived through a different host.
+	AuthservDomain string `toml:"authserv_domain"`
 }
 
 type Limits struct {
@@ -151,6 +157,17 @@ func (c *Config) AllowedJIDs() []string {
 		out = append(out, conv.JID)
 	}
 	return out
+}
+
+// TrustsAuthserv reports whether an Authentication-Results stamp came from our
+// own provider. Anything else in the message was written by the sender.
+func (c *Config) TrustsAuthserv(authservID string) bool {
+	d := strings.ToLower(strings.TrimSpace(c.Instinct.AuthservDomain))
+	if d == "" {
+		return false // unset means trust nothing, as with the rest of SEC-14
+	}
+	id := strings.ToLower(strings.TrimSpace(authservID))
+	return id == d || strings.HasSuffix(id, "."+d)
 }
 
 // Lookup resolves any alias of a conversation to its entry (FR-11).

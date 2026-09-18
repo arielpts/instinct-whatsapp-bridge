@@ -200,3 +200,30 @@ func TestLIDAndPhoneJIDResolveToOneConversation(t *testing.T) {
 		t.Error("conversation carries no number to address mail from")
 	}
 }
+
+// Providers stamp Authentication-Results with whichever MX took the message,
+// so the trust check is on the domain. Pinning a hostname would reject real
+// mail that arrived through a sibling host.
+func TestTrustsAuthservByDomain(t *testing.T) {
+	f := file()
+	f.Instinct.AuthservDomain = "migadu.com"
+	c, err := build(base(), f, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"mx13.migadu.com", "mx1.migadu.com", "MIGADU.COM", " migadu.com "} {
+		if !c.TrustsAuthserv(id) {
+			t.Errorf("%q should be trusted", id)
+		}
+	}
+	for _, id := range []string{"mx13.migadu.com.evil.test", "evilmigadu.com", "", "gmail.com"} {
+		if c.TrustsAuthserv(id) {
+			t.Errorf("%q must not be trusted", id)
+		}
+	}
+	// Unset trusts nothing, like the rest of SEC-14.
+	c2, _ := build(base(), file(), "")
+	if c2.TrustsAuthserv("mx13.migadu.com") {
+		t.Error("an unset authserv domain trusted a stamp")
+	}
+}

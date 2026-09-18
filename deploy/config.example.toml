@@ -15,7 +15,10 @@ from_addresses   = []
 dkim_domains     = []
 envelope_domains = []
 ip_ranges        = []
-authserv_id      = ""
+# The provider stamps Authentication-Results with whichever MX handled the
+# message -- mx13.migadu.com today, something else tomorrow -- so this is the
+# domain those hosts live in, not one hostname.
+authserv_domain  = ""
 
 [limits]
 per_conversation_per_hour = 5    # counted in bubbles, not candidates
