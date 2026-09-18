@@ -1,0 +1,253 @@
+// Package wa is the WhatsApp side of the bridge: the whatsmeow client, the
+// allowlist filter in front of it, and the send path behind the approval gate.
+//
+// Two of whatsmeow's behaviours are load-bearing here and both are handled at
+// the event boundary rather than later:
+//
+//   - History sync arrives at pairing and carries recent messages from EVERY
+//     chat, not just allow-listed ones. It is dropped unconditionally (SEC-9).
+//   - Read receipts and typing indicators are never emitted, so reading leaves
+//     no trace on the account (SEC-10).
+package wa
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/arielpts/instinct-whatsapp-bridge/internal/phone"
+)
+
+var (
+	ErrNotLinked  = errors.New("wa: no linked device; run `wa-bridge pair`")
+	ErrNotOnWhats = errors.New("wa: no WhatsApp account for any candidate")
+	ErrAmbiguous  = errors.New("wa: candidates resolve to different accounts")
+)
+
+// Inbound is one allow-listed message, already reduced to what the bridge
+// forwards. Nothing else from the event survives this boundary.
+type Inbound struct {
+	MessageID    string
+	Conversation string // canonical JID of the chat
+	SenderName   string
+	SenderJID    string
+	Text         string
+	Timestamp    time.Time
+}
+
+// Allower decides whether a chat may be read at all. Returning false means the
+// message is dropped before its content is touched.
+type Allower interface {
+	Allowed(conversationJID string) bool
+}
+
+type Client struct {
+	wm      *whatsmeow.Client
+	allow   Allower
+	onMsg   func(Inbound)
+	log     waLog.Logger
+	dropped uint64 // history-sync payloads discarded, for the audit line
+}
+
+// Open builds a client over an existing database handle.
+//
+// whatsmeow's own examples open the database themselves with the cgo sqlite3
+// driver. We hand it a handle opened with the pure-Go driver instead and tell
+// it the dialect, which keeps CGO_ENABLED=0 and the arm64 cross-build intact.
+func Open(ctx context.Context, db *sql.DB, logLevel string) (*Client, error) {
+	log := waLog.Stdout("wa", logLevel, false)
+	container := sqlstore.NewWithDB(db, "sqlite3", log)
+	if err := container.Upgrade(ctx); err != nil {
+		return nil, fmt.Errorf("wa: upgrading device store: %w", err)
+	}
+	device, err := container.GetFirstDevice(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("wa: device store: %w", err)
+	}
+	c := &Client{wm: whatsmeow.NewClient(device, log), log: log}
+	c.wm.AddEventHandler(c.handle)
+	return c, nil
+}
+
+// OnMessage registers the sink for allow-listed inbound text, and the
+// allowlist that guards it. Both are required before connecting.
+func (c *Client) OnMessage(allow Allower, fn func(Inbound)) {
+	c.allow, c.onMsg = allow, fn
+}
+
+func (c *Client) Connect(ctx context.Context) error { return c.wm.Connect() }
+func (c *Client) Disconnect()                       { c.wm.Disconnect() }
+
+// LinkedJID reports the account this box is linked to, or ErrNotLinked.
+func (c *Client) LinkedJID() (types.JID, error) {
+	if c.wm.Store.ID == nil {
+		return types.JID{}, ErrNotLinked
+	}
+	return *c.wm.Store.ID, nil
+}
+
+// DroppedHistorySyncs is the count of history-sync payloads discarded, so the
+// audit log can show the drop happening rather than assert it.
+func (c *Client) DroppedHistorySyncs() uint64 { return c.dropped }
+
+// PairQR returns the channel of QR codes to render for linking. Pairing needs
+// the phone in hand, which is worth knowing before the session drops.
+func (c *Client) PairQR(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
+	if c.wm.Store.ID != nil {
+		return nil, errors.New("wa: already linked; delete the device store to re-pair")
+	}
+	return c.wm.GetQRChannel(ctx)
+}
+
+func (c *Client) handle(evt any) {
+	switch e := evt.(type) {
+
+	case *events.HistorySync:
+		// Everything in here is other people's messages from chats we were
+		// never granted. There is no filtering step that makes it acceptable
+		// to keep, so it is not kept (SEC-9).
+		c.dropped++
+		c.log.Infof("discarded history sync (%d so far); it is not ours to read", c.dropped)
+
+	case *events.Message:
+		c.handleMessage(e)
+
+	case *events.LoggedOut:
+		// Degrade to "forwards stop", loudly. Silent inactivity is the failure
+		// mode that goes unnoticed for a week (OPS-5).
+		c.log.Errorf("device was unlinked: %s -- forwarding has stopped until re-paired", e.Reason)
+	}
+}
+
+func (c *Client) handleMessage(e *events.Message) {
+	// Groups are a non-goal: forwarding one exposes third parties who never
+	// agreed to any of this.
+	if e.Info.IsGroup || e.Info.IsFromMe {
+		return
+	}
+	chat, err := phone.ParseJID(e.Info.Chat.String())
+	if err != nil {
+		return // groups and unknown servers never reach the allowlist
+	}
+	if c.allow == nil || !c.allow.Allowed(chat.String()) {
+		return
+	}
+	text := extractText(e.Message)
+	if text == "" {
+		return // media and other non-text are out of scope for v1
+	}
+	sender, err := phone.ParseJID(e.Info.Sender.String())
+	if err != nil {
+		return
+	}
+	if c.onMsg != nil {
+		c.onMsg(Inbound{
+			MessageID:    string(e.Info.ID),
+			Conversation: chat.String(),
+			SenderName:   e.Info.PushName,
+			SenderJID:    sender.String(),
+			Text:         text,
+			Timestamp:    e.Info.Timestamp,
+		})
+	}
+}
+
+// extractText pulls the plain body out of the message shapes that carry one.
+// Anything else returns empty and is skipped rather than guessed at.
+func extractText(m *waE2E.Message) string {
+	if m == nil {
+		return ""
+	}
+	if s := m.GetConversation(); s != "" {
+		return s
+	}
+	if ext := m.GetExtendedTextMessage(); ext != nil {
+		return ext.GetText()
+	}
+	return ""
+}
+
+// Resolve answers which account a number really belongs to.
+//
+// Candidates come from phone.Candidates, which for Brazilian mobiles offers
+// the number with and without the ninth digit. WhatsApp decides; we never do.
+// Zero hits, or hits that disagree, fail loudly so a human picks (FR-10).
+func (c *Client) Resolve(ctx context.Context, number string) (types.JID, error) {
+	candidates, err := phone.Candidates(number)
+	if err != nil {
+		return types.JID{}, err
+	}
+	queries := make([]string, len(candidates))
+	for i, d := range candidates {
+		queries[i] = "+" + d
+	}
+	responses, err := c.wm.IsOnWhatsApp(ctx, queries)
+	if err != nil {
+		return types.JID{}, fmt.Errorf("wa: checking %v: %w", queries, err)
+	}
+
+	var found []types.JID
+	for _, r := range responses {
+		if !r.IsIn {
+			continue
+		}
+		if !containsJID(found, r.JID) {
+			found = append(found, r.JID)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return types.JID{}, fmt.Errorf("%w: tried %v", ErrNotOnWhats, queries)
+	case 1:
+		return found[0], nil
+	default:
+		return types.JID{}, fmt.Errorf("%w: %v", ErrAmbiguous, found)
+	}
+}
+
+func containsJID(list []types.JID, j types.JID) bool {
+	for _, v := range list {
+		if v.User == j.User && v.Server == j.Server {
+			return true
+		}
+	}
+	return false
+}
+
+// SendText delivers one bubble. replyTo, when set, quotes the message being
+// answered.
+//
+// This is the only path to WhatsApp in the binary, and it is deliberately
+// dumb: every check that decides whether a message may go out has already
+// happened by the time it is called.
+func (c *Client) SendText(ctx context.Context, to types.JID, text string, replyTo *Inbound) (string, error) {
+	msg := &waE2E.Message{Conversation: proto.String(text)}
+	if replyTo != nil {
+		participant, err := types.ParseJID(replyTo.SenderJID)
+		if err != nil {
+			return "", fmt.Errorf("wa: reply target: %w", err)
+		}
+		msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: proto.String(text),
+			ContextInfo: &waE2E.ContextInfo{
+				StanzaID:    proto.String(replyTo.MessageID),
+				Participant: proto.String(participant.String()),
+			},
+		}}
+	}
+	resp, err := c.wm.SendMessage(ctx, to, msg)
+	if err != nil {
+		return "", fmt.Errorf("wa: send: %w", err)
+	}
+	return resp.ID, nil
+}
