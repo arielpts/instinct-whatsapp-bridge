@@ -98,11 +98,30 @@ upsert() {
 	fi
 
 	existing=$(cf "${API}/zones/${ZONE_ID}/dns_records?type=${type}&name=${name}")
-	if [ -n "$priority" ]; then
+	case "$type" in
+	MX)
+		# Several MX records share a name; the host distinguishes them.
 		id=$(echo "$existing" | jq -r --arg c "$content" '.result[] | select(.content==$c) | .id' | head -1)
-	else
+		;;
+	TXT)
+		# So do several TXT records -- SPF, DMARC and the ownership token can
+		# all sit on one name. Matching the first one found would have each
+		# overwrite the last, leaving one survivor chosen by running order.
+		# Match on what the value announces itself to be instead.
+		local key
+		case "$content" in
+		v=spf1*) key="v=spf1" ;;
+		v=DMARC1*) key="v=DMARC1" ;;
+		*=*) key="${content%%=*}=" ;;
+		*) key="$content" ;;
+		esac
+		id=$(echo "$existing" | jq -r --arg k "$key" \
+			'.result[] | select((.content | ltrimstr("\"")) | startswith($k)) | .id' | head -1)
+		;;
+	*)
 		id=$(echo "$existing" | jq -r '.result[0].id // empty')
-	fi
+		;;
+	esac
 
 	if [ -n "$id" ]; then
 		cf -X PUT "${API}/zones/${ZONE_ID}/dns_records/${id}" --data "$body" \
