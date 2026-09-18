@@ -53,7 +53,9 @@ in a single test conversation.
 **Out of scope (explicit non-goals)**
 - Mirroring the entire WhatsApp account. Never the default, never a config flag.
 - Reading or forwarding conversations not on the allowlist.
-- Group conversations in v1 (third-party exposure is disproportionate).
+- Group conversations in v1 (third-party exposure is disproportionate). What
+  would have to be true to change that is written down in
+  [`docs/groups.md`](docs/groups.md), unimplemented.
 - Media (images, audio, documents). v1 handles text and message metadata only.
 - Any autonomous initiation of a conversation. The bridge only ever replies.
 - Multi-tenant operation. One owner, one WhatsApp account, one box.
