@@ -109,6 +109,30 @@ func (c *Client) PairQR(ctx context.Context) (<-chan whatsmeow.QRChannelItem, er
 	return c.wm.GetQRChannel(ctx)
 }
 
+// PairCode links by an eight-character code typed into WhatsApp instead of a
+// scanned QR.
+//
+// This is the right path when the operator has one screen. A QR shown in a
+// terminal on the same phone that runs WhatsApp cannot be scanned by that
+// phone, so QR pairing quietly assumes a second screen that may not exist.
+//
+// whatsmeow requires the websocket to be up first, and the login socket closes
+// after about 160 seconds, so the code is requested immediately after
+// connecting to leave the operator the most time to type it.
+func (c *Client) PairCode(ctx context.Context, number string) (string, error) {
+	if c.wm.Store.ID != nil {
+		return "", errors.New("wa: already linked; delete the device store to re-pair")
+	}
+	candidates, err := phone.Candidates(number)
+	if err != nil {
+		return "", err
+	}
+	// Pairing addresses the phone we are linking, so the number is the one the
+	// operator gives; the candidate list only normalises its punctuation.
+	return c.wm.PairPhone(ctx, "+"+candidates[0], true,
+		whatsmeow.PairClientChrome, "wa-bridge (Linux)")
+}
+
 func (c *Client) handle(evt any) {
 	switch e := evt.(type) {
 

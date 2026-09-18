@@ -561,9 +561,13 @@ Setup: one systemd unit, one service user, `0600` secrets file, `unattended-upgr
 default-deny inbound, SSH keys only. Disk stays a few hundred megabytes at default
 retention.
 
-**Pairing** is by QR (`GetQRChannel`), rendered as ASCII in the terminal over SSH
-— which means re-pairing needs physical access to the phone, and is worth knowing
-before the session drops at an inconvenient moment.
+**Pairing** is by code, not by QR. `PairPhone` returns eight characters to type
+into WhatsApp under Linked Devices; a QR rendered in a terminal assumes a second
+screen to scan it from, which an operator working from the phone that runs
+WhatsApp does not have. QR remains available for anyone with a laptop to hand.
+Either way the phone itself is required, and the login socket closes after about
+160 seconds — both worth knowing before the session drops at an inconvenient
+moment.
 
 **Back up the device store.** `state.db` holds the linked-device session: lose it
 and you re-pair from scratch; leak it and someone else holds a session on the
